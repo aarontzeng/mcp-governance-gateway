@@ -1,0 +1,124 @@
+# Security Policy
+
+## Reporting a vulnerability
+
+Please report suspected vulnerabilities privately rather than via a public
+issue. [Open a security advisory](https://github.com/aarontzeng/mcp-governance-gateway/security/advisories/new) — that form is
+private to the maintainers until an advisory is published. If you cannot use it,
+open a normal issue saying only that you have a security report and asking for a
+contact channel; do not put the details in it.
+We aim to acknowledge within a few working days.
+
+Please include what you were able to do, the token/role you held, and whether
+the issue crosses a tenant boundary — those are the reports we treat as most
+severe.
+
+## What the gateway defends
+
+The gateway's threat model assumes the agent (and therefore the MCP client) may
+be adversarial or compromised, and that a token may be stolen. Its guarantees:
+
+- **Tenant isolation is server-side.** The project/tenant is resolved from the
+  token, never taken as a tool argument. A stolen token confines the attacker to
+  that one project; it cannot be widened from the client.
+- **Issue writes are least-privilege and confirmation-gated.** They need an
+  explicit role; the confirmation id is single-use, short-lived, and bound to the
+  exact arguments, so it cannot be replayed to repeat or alter a write. Memory
+  writes are gated by tenancy and quota only — see
+  [the authorization table](docs/security-model.md#authorization-as-implemented)
+  for exactly which tools check what.
+- **Credentials are encrypted at rest.** Optional per-user backend credentials
+  use AES-256-GCM with the ciphertext bound (via AEAD associated data) to the
+  owner and the backend, so a record cannot be re-purposed as another user's or
+  another backend's credential; tampering the stored backend label fails closed.
+- **No secrets in transcripts or logs.** Tokens and credentials are never echoed
+  back; backend errors are normalized so they cannot leak another tenant's data
+  or confirm the existence of a resource in another project.
+
+## What it does not defend
+
+- The confidentiality of data a correctly-scoped token is *authorized* to read.
+- Backends' own security (agentmemory, Redmine, GitLab, Jenkins) — the gateway
+  constrains access to them; it does not harden them.
+- Transport security — terminate TLS at a reverse proxy in front of the gateway.
+
+## Known limitations
+
+Deliberate boundaries of this release, stated so a deployment does not discover
+them the hard way. Each one is a property an adopter might reasonably assume and
+should not.
+
+**A committed write is not a transactional one.** The confirmation is consumed
+before the backend call, and the audit event is written after it returns. A
+timeout after the backend has committed therefore leaves an indeterminate write:
+retrying goes through a fresh prepare/commit and can duplicate an issue or a note.
+There is no durable operation record and no backend idempotency key. Audit is a
+JSON-lines stream, so an audit failure after a committed write loses the record of
+it. Treat the audit log as a record of what the gateway decided, not as proof of
+what every backend did.
+
+**One active instance.** Confirmation state, quotas, docs snapshots and the audit
+stream are process-local, and the credential store is guarded by an in-process
+lock only. Two instances behind a load balancer are two enforcement points, not
+one: a prepare on A cannot commit on B, quotas multiply by the instance count,
+and concurrent credential enrollment can lose a record. Run one active instance
+until that state moves to shared storage.
+
+**"Last good" applies to authorization state too.** A token file that becomes
+unreadable leaves the previously loaded claims live, so an emergency revoke that
+corrupts or truncates the file may not take effect. Verify a revoke by observing a
+rejection, not by observing that the file changed. In optional per-user credential
+mode, an unavailable keystore falls back to the shared backend credential: writes
+continue, but native authorship silently becomes the service account's.
+
+**Identity propagation is an attribution override, not an authentication hop.**
+The signed-header path verifies an HMAC over `user_id:email` and nothing else — no
+issuer, audience, expiry or replay id — and a request without those headers
+silently uses the token's own actor. Do not treat a propagated identity as
+independently authenticated, and do not rely on the absence of headers being
+noticed.
+
+**Encryption at rest is not key management.** The keystore's master key is read at
+startup, so rotating it requires a restart — the multiple-key support removes the
+need to re-enroll credentials, not the need to roll the process. If the ciphertext
+and the master key share a host or a backup, encryption is protecting against a
+narrower set of disclosures than it appears to.
+
+**Provenance is commit metadata.** `createdBy`/`updatedBy` come from Git's author
+name, which is supplied by whoever made the commit. Branch protection and review
+on the repository are what make that trustworthy; the gateway does not verify it
+and it is not an identity assertion. Do not let an authorization decision depend
+on it.
+
+**Health is liveness, not readiness.** `/healthz` reports that the process is up
+and whether the keystore is degraded. It does not check backends, audit, or
+configuration, so it must not be used to decide whether an instance is safe to
+route writes to.
+
+**The docs corpus is bounded by an assumption.** Full clone with history, whole-
+corpus listing and unbounded document bodies are all fine for the small reviewed
+corpus this is designed for, and none of them is enforced. Monitor snapshot age,
+refresh duration, clone disk and document count; a corpus that outgrows "small"
+will show up as refresh latency and memory before request rate becomes the limit.
+
+**Read access to externally governed repositories.** The gateway serves the docs
+corpus; it does not create, review, validate or maintain it. Declared lifecycle
+fields (`status`, `stale_after`, `decision_status`) are passed through untouched —
+they are the repository's claims, not gateway-enforced guarantees.
+
+**One issue tracker per deployment** (ADR-0013). This is coherent while a
+deployment is dedicated to one tracker. A genuinely mixed deployment would have to
+route per project through tokens, credential storage, confirmation recovery and
+audit identity at once; it is not a drop-in second adapter.
+
+## Hardening checklist
+
+- Serve behind TLS; restrict the listener to trusted networks.
+- Give each backend credential the narrowest scope that works (a read-only CI
+  token, a project-scoped issue account).
+- Rotate the keystore master key and backend service credentials periodically.
+  Multiple master keys mean a rotation does not force users to re-enroll; it does
+  still require a restart to load the new key.
+- Run exactly one active instance, and monitor snapshot age, artifact-download
+  outcomes and keystore degradation — see "Known limitations".
+- Keep the audit log on separate, append-only storage.

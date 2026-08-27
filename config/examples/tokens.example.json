@@ -1,0 +1,10 @@
+{
+  "tokens": [
+    {
+      "token": "replace-with-random-pilot-token",
+      "actor": "user@example.com",
+      "project": "example-project",
+      "roles": ["developer"]
+    }
+  ]
+}

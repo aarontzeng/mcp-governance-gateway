@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.log
+node_modules/
+dist/
+coverage/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.DS_Store
+build/
+*.egg-info/
