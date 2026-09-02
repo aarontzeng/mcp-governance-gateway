@@ -51,12 +51,13 @@ class PolicyDecision:
 
 
 class Policy:
-    # Phase 1 authorization is a project-scoped, exact-match allow-list. The token's
-    # `roles` are carried on the Principal but are NOT used here yet: role-based RBAC
-    # and role-dependent tool visibility are deferred. Memory tools are allowed for
-    # any token that carries a project; issue tools additionally require the token to
-    # carry an issue_project (the tenant boundary for the issue tracker). Everything
-    # else is denied, and destructive operations are always denied. See roadmap Phase 5.
+    # Phase 1 authorization is a project-scoped, exact-match allow-list. Memory tools
+    # are allowed for any token that carries a project; issue tools additionally
+    # require the token to carry an issue_project (the tenant boundary for the issue
+    # tracker), and issue writes require the issue_writer role. Roles beyond that one
+    # are carried on the Principal but not interpreted: general RBAC is deferred (see
+    # roadmap Phase 5). Everything else is denied, and destructive operations are
+    # always denied.
     _ALLOWED_MEMORY_TOOLS = frozenset({"memory.search", "memory.save", "memory.list", "memory.lesson_save", "memory.lesson_list", "memory.action_create", "memory.action_list", "memory.action_update_status"})
     _DESTRUCTIVE_SUFFIXES = ("delete", "destroy", "purge", "remove")
 

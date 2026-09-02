@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import threading
+import time
 import uuid
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -113,6 +114,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "job and path are required"})
                 return
             request_id = str(uuid.uuid4())
+            started = time.monotonic()
             context = RequestContext(
                 actor=principal.actor, project=principal.project,
                 client="ci-artifact", request_id=request_id,
@@ -128,7 +130,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     request_id=request_id, actor=principal.actor, project=principal.project,
                     tool="ci.artifact.download", decision="allow", outcome=outcome,
                     reason=reason, resource_id=f"{job}:{rel_path}",
-                    duration_ms=None if sent is None else sent,
+                    duration_ms=int((time.monotonic() - started) * 1000), bytes_sent=sent,
                 ))
 
             # A stream holds a thread and an upstream connection for its whole
@@ -351,9 +353,9 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
         )
     issue_backend = None
     if settings.issue_backend == "gitlab":
-        # GitLab deployment (ADR-0013): shared token + attribution footer; the
-        # per-user keystore/enforced mode is Redmine-specific until the
-        # credential store is generalized (roadmap Phase 9).
+        # GitLab deployment (ADR-0013): shared token + attribution footer, with
+        # the same per-user credential store as Redmine (keyed by backend) and
+        # its own enforced-mode switch.
         if settings.redmine_enforce_personal_key:
             raise ValueError("REDMINE_ENFORCE_PERSONAL_KEY has no effect with ISSUE_BACKEND=gitlab; unset it")
         if settings.gitlab_enforce_personal_key and keystore is None:

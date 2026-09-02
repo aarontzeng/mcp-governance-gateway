@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import hmac
 import json
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -90,10 +91,11 @@ class BearerTokenAuthenticator:
             # place), so a concurrent authenticate under the threaded server always sees a
             # complete map (old or new) without a lock.
             self._token_claims = self._load_all(self._sources)
-        except Exception:
+        except Exception as exc:
             # keep the last-good token map on a missing/partial/corrupt file so a bad
-            # write can never lock everyone out; retry on the next file change.
-            pass
+            # write can never lock everyone out; retry on the next file change. Say so
+            # loudly: a revoke written into a corrupt file has NOT taken effect.
+            print(f"token file reload failed; keeping the last-good token set: {exc}", file=sys.stderr, flush=True)
         self._mtimes = current
 
     def authenticate_header(self, authorization: str | None) -> Principal:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import subprocess
 import tempfile
@@ -707,6 +709,27 @@ class TreeReadTests(unittest.TestCase):
             corpus.list(_ctx("p"))
         self.assertEqual(cm.exception.status, 503)
         self.assertIn("timed out", str(cm.exception))
+
+    def test_git_stderr_goes_to_the_operator_log_never_to_the_client(self):
+        # git's stderr can quote the remote URL, a host, or a server sideband
+        # message; the tool error the client reads must not carry any of it.
+        corpus = self._corpus()
+        original = corpus._git
+        sentinel = "SENTINEL-git-said-ssh://svc-user@internal-host/x"
+
+        def fail(cwd, *args, **kwargs):
+            if args and args[0] == "clone":
+                raise subprocess.CalledProcessError(128, ["git", "clone"], stderr=sentinel.encode())
+            return original(cwd, *args, **kwargs)
+
+        corpus._git = fail
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(DocsBackendError) as cm:
+            corpus.list(_ctx("p"))
+        self.assertEqual(cm.exception.status, 503)
+        self.assertNotIn(sentinel, str(cm.exception))
+        self.assertNotIn("internal-host", str(cm.exception))
+        self.assertIn("docs corpus unavailable", str(cm.exception))
+        self.assertIn(sentinel, err.getvalue())   # the operator still sees why
 
     def test_content_with_multibyte_text_survives_the_batch_read(self):
         _write_files(self.work, {"wiki/cjk.md": "# 中文標題\n\n內容 — with dash\n"})

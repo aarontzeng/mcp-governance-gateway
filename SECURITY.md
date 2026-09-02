@@ -57,6 +57,20 @@ JSON-lines stream, so an audit failure after a committed write loses the record 
 it. Treat the audit log as a record of what the gateway decided, not as proof of
 what every backend did.
 
+**Memory search trusts the backend's project filter.** `memory.search` sends the
+token's project to agentmemory and returns what comes back; the hits carry no
+project field, so the gateway cannot re-filter them the way it re-filters issue
+and docs results. A backend that ignores its own filter would leak across tenants
+through this one tool. `memory.action_update_status` checks the target's project
+by listing first and then updates by id, so a record re-homed between the two
+calls is updated on its new project.
+
+**Secret scanning is best-effort.** Memory writes are rejected when they contain
+a credential-shaped unbroken blob (a PEM key, a well-known token prefix, a JWT, a
+`key=value` assignment). Values broken up with hyphens or spaces, or in formats the
+patterns do not know, pass by design; the scanner is a guardrail against the
+accidental paste, not a data-loss-prevention boundary.
+
 **One active instance.** Confirmation state, quotas, docs snapshots and the audit
 stream are process-local, and the credential store is guarded by an in-process
 lock only. Two instances behind a load balancer are two enforcement points, not

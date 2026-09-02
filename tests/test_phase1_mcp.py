@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import io
 import json
 import os
 import sys
@@ -1057,7 +1058,10 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertEqual(event.tool, "ci.artifact.download")
         self.assertEqual(event.outcome, "ok")
         self.assertEqual(event.resource_id, "swarm-build:out/image.bin")
-        self.assertEqual(event.duration_ms, len(self.PAYLOAD))  # bytes delivered
+        self.assertEqual(event.bytes_sent, len(self.PAYLOAD))  # bytes delivered
+        self.assertIsInstance(event.duration_ms, int)           # and how long it took
+        self.assertGreaterEqual(event.duration_ms, 0)
+        self.assertEqual(event.to_json()["bytesSent"], len(self.PAYLOAD))
 
     def test_a_declared_size_over_the_cap_is_refused_before_streaming(self) -> None:
         port = self._server(max_bytes=1024)
@@ -2369,9 +2373,22 @@ class MultiFileTokenReloadTests(unittest.TestCase):
             self.assertEqual(auth.authenticate_header("Bearer usr").actor, "a@x")
             user.write_text("{ not valid json", encoding="utf-8")
             self._bump_mtime(user)
-            # corrupt reload keeps last-good map; both tokens still authenticate
-            self.assertEqual(auth.authenticate_header("Bearer usr").actor, "a@x")
+            # corrupt reload keeps last-good map; both tokens still authenticate --
+            # and says so on stderr, because a revoke in that file did NOT land.
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertEqual(auth.authenticate_header("Bearer usr").actor, "a@x")
             self.assertEqual(auth.authenticate_header("Bearer svc").project, "x")
+            self.assertIn("token file reload failed", err.getvalue())
+            self.assertIn("last-good", err.getvalue())
+
+    def test_the_shipped_example_token_file_parses(self) -> None:
+        # config/examples/tokens.example.json is what .env.example points people at;
+        # it must stay loadable by the real parser.
+        example = Path(__file__).resolve().parents[1] / "config" / "examples" / "tokens.example.json"
+        auth = BearerTokenAuthenticator.from_files([(example, True)])
+        principal = auth.authenticate_header("Bearer replace-with-random-pilot-token")
+        self.assertEqual(principal.actor, "user@example.com")
+        self.assertEqual(principal.project, "example-project")
 
     def test_hot_reload_drops_revoked_token(self) -> None:
         with tempfile.TemporaryDirectory() as d:

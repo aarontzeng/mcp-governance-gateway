@@ -23,6 +23,7 @@ class AuditEvent:
     resource_id: str | None = None
     backend_status: str | None = None
     duration_ms: int | None = None
+    bytes_sent: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -37,6 +38,7 @@ class AuditEvent:
             "resourceId": self.resource_id,
             "backendStatus": self.backend_status,
             "durationMs": self.duration_ms,
+            "bytesSent": self.bytes_sent,
         }
 
 

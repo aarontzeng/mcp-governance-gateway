@@ -20,6 +20,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -360,9 +361,18 @@ class DocsCorpus:
                 # A different specification, though, means the old snapshot is another
                 # corpus. Unavailable is the honest answer; quietly serving the
                 # previous repository's documents would not be.
+                # git's stderr names the remote (and can quote a URL, a host, or a
+                # sideband message from the server), so it goes to the operator's
+                # log, never into the tool error the client reads.
                 stderr = exc.stderr if isinstance(exc.stderr, bytes) else b""
-                detail = stderr.decode(errors="replace").strip() or "git timed out"
-                raise DocsBackendError(f"docs corpus unavailable: {detail[:200]}", status=503) from exc
+                timed_out = isinstance(exc, subprocess.TimeoutExpired)
+                print(
+                    f"docs corpus refresh failed for project {spec.project!r}: "
+                    + ("git timed out" if timed_out else stderr.decode(errors="replace").strip()[:500]),
+                    file=sys.stderr, flush=True,
+                )
+                detail = "git timed out" if timed_out else "git clone/fetch failed"
+                raise DocsBackendError(f"docs corpus unavailable: {detail}", status=503) from exc
             # Resolved before taking the snapshot lock, so no lock is ever held while
             # another is acquired.
             still_current = self._resolve_spec_quietly(spec.project) == spec.fingerprint

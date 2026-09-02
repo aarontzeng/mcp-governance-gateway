@@ -14,7 +14,7 @@ memory service.
 | `memory.lesson_list` | read | List the project's lessons, highest confidence first — the cap keeps the most reinforced rules rather than an arbitrary backend prefix |
 | `memory.action_create` | write | Create a project-scoped follow-up action (`{title, description?, priority?}`); status starts `pending` |
 | `memory.action_list` | read | List the project's **open** actions (pending/active/blocked) — the live board. `includeDone:true` adds completed ones, for reports. Done is filtered out *before* the limit window, so a finished action cannot crowd out an open one |
-| `memory.action_update_status` | write | Advance an action `pending→active→done/blocked` via `POST /agentmemory/actions/update {actionId, status}`; the target is project-pre-checked (a cross-project id → 404) and `status` is enum-validated server-side |
+| `memory.action_update_status` | write | Advance an action `pending→active→done/blocked` via `POST /agentmemory/actions/update {actionId, status}`; the target is project-pre-checked (a cross-project id → 404) and `status` is enum-validated server-side. The pre-check is a list, the update is by id: a record re-homed between the two calls is updated on its new project |
 
 All memory writes are **secret-scanned server-side** before the quota check: text
 matching a high-precision credential pattern (a PEM private key, an AWS/GitHub/

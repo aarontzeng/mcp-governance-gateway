@@ -14,7 +14,7 @@ Accepted
 implementation, so the tool namespace (`issues.*`) is already
 capability-shaped. But the **tenant claim was vendor-named**: tokens carried
 `redmine_project`, `Policy` hard-checked `principal.redmine_project`, and
-`RequestContext` propagated it. Other company projects use **GitLab** for
+`RequestContext` propagated it. Other teams use **GitLab** for
 issues, so onboarding them requires a second issue backend — and a project
 backed by GitLab has no "Redmine project id". The abstraction was decorative
 while the claim that gates it named one vendor.

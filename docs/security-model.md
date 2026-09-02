@@ -101,8 +101,8 @@ Recommended signed assertion fields:
 
 ```json
 {
-  "iss": "mcp-governance-gateway",
-  "aud": "internal-tools-adapter",
+  "iss": "front-gateway",
+  "aud": "mcp-governance-gateway",
   "sub": "user@example.com",
   "project": "example-project",
   "roles": ["developer"],

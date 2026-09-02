@@ -41,8 +41,8 @@ configuration — run only the ones you need.
 | CI | `ci.status` / `ci.log` / `ci.artifact` | Jenkins (read-only) |
 
 Each backend enforces the same tenancy discipline: operations are scoped to the
-token's project, results are re-filtered defensively, and errors never leak the
-existence of another tenant's data.
+token's project, results are re-filtered wherever the backend returns the tenant
+field, and errors never leak the existence of another tenant's data.
 
 ## Security model in one paragraph
 
@@ -57,6 +57,8 @@ user's or another backend's. See [`docs/security-model.md`](docs/security-model.
 and the [architecture decision records](docs/decisions/).
 
 ## Quickstart
+
+Requires Python 3.11 or newer.
 
 ```bash
 pip install .
