@@ -927,7 +927,7 @@ class CiArtifactRouteTests(unittest.TestCase):
 
     def _server(self, project="proj-a", artifact_path="out/image.bin",
                 max_bytes=None, max_concurrent=None, declare_length=True, block=None,
-                declared_length=None, drop_after=None):
+                declared_length=None, drop_after=None, drop_error=None, open_error=None):
         import threading
         import time
 
@@ -981,9 +981,10 @@ class CiArtifactRouteTests(unittest.TestCase):
                 # concurrency cap can be observed instead of raced against.
                 if block is not None and reads:
                     block.wait(timeout=5)
-                # `drop_after` makes the upstream die mid-stream after that many reads.
+                # `drop_after` makes the upstream die mid-stream after that many
+                # reads; `drop_error` picks how (a socket error by default).
                 if drop_after is not None and len(reads) >= drop_after:
-                    raise OSError("upstream connection reset")
+                    raise drop_error or OSError("upstream connection reset")
                 chunk, self._left = self._left[:n], self._left[n:]
                 reads.append(len(chunk))
                 return chunk
@@ -992,7 +993,13 @@ class CiArtifactRouteTests(unittest.TestCase):
                 closed.append(True)
 
         srv.ci_backend._fetch = lambda path: listing          # type: ignore[method-assign]
-        srv.ci_backend._open = lambda path: _Upstream()       # type: ignore[method-assign]
+        def _open(path):
+            # `open_error` makes the fetch itself fail, after validation passed.
+            if open_error is not None:
+                raise open_error
+            return _Upstream()
+
+        srv.ci_backend._open = _open                          # type: ignore[method-assign]
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.shutdown)
         time.sleep(0.2)
@@ -1131,6 +1138,25 @@ class CiArtifactRouteTests(unittest.TestCase):
         # stream was stopped at.
         self.assertLessEqual(event.bytes_sent, 100_000)
 
+    def test_a_negative_content_length_is_treated_as_no_length(self) -> None:
+        # Review, 2026-09-03: "-1" parses as an int, so it slipped past the cap
+        # check and was forwarded as Content-Length: -1, which every client reads
+        # as "unknown, read to EOF": the capped stop was invisible again.
+        import http.client
+
+        port = self._server(max_bytes=100_000, declared_length=-1)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/ci/artifact?job=swarm-build&build=291&path=out/image.bin",
+                     headers={"Authorization": "Bearer tok-a"})
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(response.getheader("Content-Length"))
+        self.assertEqual(response.getheader("Transfer-Encoding"), "chunked")
+        with self.assertRaises(http.client.IncompleteRead):
+            response.read()
+        conn.close()
+        self.assertEqual(self.audit.events[-1].outcome, "truncated")
+
     def test_an_upstream_that_drops_mid_stream_leaves_the_body_incomplete(self) -> None:
         # No length and the upstream dies after the first chunk: no terminator is
         # written and the connection is closed, so the client learns at once that
@@ -1150,6 +1176,37 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertEqual(event.outcome, "interrupted")
         self.assertGreater(event.bytes_sent, 0)
         self.assertLess(event.bytes_sent, len(self.PAYLOAD))
+
+    def test_an_upstream_whose_own_framing_breaks_is_audited_the_same_way(self) -> None:
+        # Review, 2026-09-03: an upstream chunked body that ends inside a chunk
+        # raises IncompleteRead, an HTTPException rather than an OSError; the
+        # handler only caught the latter, so the transfer escaped the audit log.
+        import http.client
+
+        port = self._server(declare_length=False, drop_after=1,
+                            drop_error=http.client.IncompleteRead(b""))
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/ci/artifact?job=swarm-build&build=291&path=out/image.bin",
+                     headers={"Authorization": "Bearer tok-a"})
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        with self.assertRaises(http.client.IncompleteRead):
+            response.read()
+        conn.close()
+        event = self.audit.events[-1]
+        self.assertEqual(event.outcome, "interrupted")
+        self.assertEqual(event.resource_id, "swarm-build:out/image.bin")
+
+    def test_an_open_that_fails_after_validation_still_names_the_artifact(self) -> None:
+        # The refusal test above keeps typed strings out of the audit log; once the
+        # job and path have passed the allowlist and the listing they are the
+        # gateway's own words, and a failed fetch has to be traceable to them.
+        port = self._server(open_error=IssueBackendError("CI unavailable"))  # CiBackendError is this class
+        response, _ = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        self.assertEqual(response.status, 502)
+        event = self.audit.events[-1]
+        self.assertEqual(event.outcome, "backend_error")
+        self.assertEqual(event.resource_id, "swarm-build:out/image.bin")
 
     def test_an_upstream_without_a_length_is_chunk_delimited(self) -> None:
         # No upstream length: the body is chunked, so it is self-delimiting (a
@@ -1173,11 +1230,19 @@ class CiArtifactRouteTests(unittest.TestCase):
         conn.close()
 
     def test_an_upstream_that_delivers_less_than_it_declared_is_not_audited_ok(self) -> None:
+        import http.client
+
         port = self._server(declared_length=len(self.PAYLOAD) + 1000)
-        try:
-            self._get(port, "job=swarm-build&build=291&path=out/image.bin")
-        except Exception:
-            pass  # the client sees an incomplete read; that is the upstream's doing
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/ci/artifact?job=swarm-build&build=291&path=out/image.bin",
+                     headers={"Authorization": "Bearer tok-a"})
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        # The gateway closes rather than leave the client waiting for bytes that
+        # will never come: an incomplete read, not a timeout.
+        with self.assertRaises(http.client.IncompleteRead):
+            response.read()
+        conn.close()
         event = self.audit.events[-1]
         self.assertEqual(event.outcome, "interrupted")
         self.assertIn("declared", event.reason)

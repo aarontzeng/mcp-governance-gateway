@@ -69,11 +69,14 @@ by listing first and then updates by id, so a record re-homed between the two
 calls is updated on its new project.
 
 **Issue writes are check-then-write too.** `issues.add_note` and
-`issues.update_status` verify the issue's project with a read and then write
-by id; neither Redmine nor GitLab offers a conditional write, so an issue moved
-to another project between the two calls receives the write on its new
-project. The window is one round-trip and the write still lands under the
-caller's own credential when one is enrolled.
+`issues.update_status` verify the issue's project with a read and then write;
+neither Redmine nor GitLab offers a conditional write. What an issue moved to
+another project between the two calls receives depends on the backend: Redmine
+writes by global id, so the write lands on the issue in its new project; GitLab
+writes through the checked project's own path, and a move there leaves a closed
+copy behind in the original project, which is what receives the write. The
+window is one round-trip and the write still lands under the caller's own
+credential when one is enrolled.
 
 **One 403 names a project the shared key can see.** When a caller's personal
 Redmine key is refused with 403 for an issue their own account cannot read, the

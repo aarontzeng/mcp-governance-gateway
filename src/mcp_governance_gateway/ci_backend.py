@@ -169,6 +169,13 @@ class JenkinsHttpBackend:
         That second check is the anti-traversal guard: only paths Jenkins itself lists
         are fetchable, so `..`, an absolute path or any other invented one cannot be
         spliced through. Returns the open response; the caller streams and closes it."""
+        return self.open_located(self.locate_artifact(job, build, rel_path, context))
+
+    def locate_artifact(self, job: str, build: object, rel_path: str, context: RequestContext) -> str:
+        """The validation half of open_artifact: returns the upstream path of an
+        artifact the caller may fetch, or raises. Split out so a caller can tell a
+        refusal (job or path unknown: audit nothing the caller typed) from an open
+        that failed AFTER validation (audit the artifact it failed for)."""
         name = self._require_allowlisted(job, context)
         ref = _safe_build_ref(build)
         rel = (rel_path or "").strip()
@@ -179,7 +186,11 @@ class JenkinsHttpBackend:
             # Identical to a foreign job: never reveal whether the path exists.
             raise CiBackendError("unknown artifact for this build", status=404)
         segments = "/".join(parse.quote(part, safe="") for part in rel.split("/"))
-        return self._open(f"/job/{parse.quote(name, safe='')}/{ref}/artifact/{segments}")
+        return f"/job/{parse.quote(name, safe='')}/{ref}/artifact/{segments}"
+
+    def open_located(self, upstream_path: str):
+        """The network half of open_artifact; takes what locate_artifact returned."""
+        return self._open(upstream_path)
 
     # --- internals -----------------------------------------------------
 

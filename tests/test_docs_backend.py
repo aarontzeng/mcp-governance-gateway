@@ -483,8 +483,9 @@ class ReposHotReloadTests(unittest.TestCase):
         for key in ("../other-repo", "/abs", "a/b", "..", ".", ".git"):
             with self.subTest(key=key):
                 self.repos_file.write_text(json.dumps({key: {"url": "x", "branch": "main"}}))
-                with self.assertRaises(ValueError):
+                with self.assertRaises(ValueError) as caught:
                     load_docs_repos(str(self.repos_file))
+                self.assertIn(repr(key), str(caught.exception))  # the operator learns which key
         for key in ("ok-name.v2", "_scratch"):  # dots inside and a leading underscore stay legal
             self.repos_file.write_text(json.dumps({key: {"url": "x", "branch": "main"}}))
             self.assertIn(key, load_docs_repos(str(self.repos_file)))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from http import HTTPStatus
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
@@ -148,10 +149,11 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 try:
-                    # open_artifact enforces the allowlist AND that this path is a real
+                    # locate_artifact enforces the allowlist AND that this path is a real
                     # artifact of the build, which is what makes traversal impossible.
-                    upstream = ci.open_artifact(job, build, rel_path, context)
-                    resource_id = f"{job}:{rel_path}"
+                    location = ci.locate_artifact(job, build, rel_path, context)
+                    resource_id = f"{job}:{rel_path}"   # validated: safe to record from here on
+                    upstream = ci.open_located(location)
                 except CiBackendError as exc:
                     audit("backend_error", str(exc))
                     self._send_json(int(exc.status or 502), {"error": str(exc)})
@@ -160,6 +162,10 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 try:
                     declared = int(upstream.headers.get("Content-Length") or 0)
                 except ValueError:
+                    declared = 0
+                if declared < 0:
+                    # A negative length is no length (http.client reads it the same
+                    # way). Forwarded, it would make the body close-delimited again.
                     declared = 0
                 if declared > cap:
                     audit("rejected", f"declared {declared} bytes exceeds cap {cap}")
@@ -220,10 +226,12 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                         self.close_connection = True
                         return
                     audit("ok", "", sent)
-                except OSError:
-                    # Client hung up or upstream dropped mid-stream: the headers are
-                    # already out, so there is nothing to report to the caller, and
-                    # the connection is desynchronized either way.
+                except (OSError, http.client.HTTPException):
+                    # Client hung up, upstream dropped, or the upstream's own framing
+                    # broke mid-stream (IncompleteRead is an HTTPException, not an
+                    # OSError): the headers are already out, so there is nothing to
+                    # report to the caller, and the connection is desynchronized
+                    # either way.
                     audit("interrupted", "client or upstream dropped mid-stream", sent)
                     self.close_connection = True
                 finally:
