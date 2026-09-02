@@ -307,7 +307,11 @@ class SpecKeyedSnapshotTests(unittest.TestCase):
 
         self.corpus._git = flaky
         self.corpus._snapshots["p"].refreshed_at -= 7200  # force a refresh attempt
-        self.assertEqual(self.corpus.get("wiki/x.md", _ctx("p"))["text"], "# First")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.corpus.get("wiki/x.md", _ctx("p"))["text"], "# First")
+        # The reader cannot tell it was served stale content; the operator must.
+        self.assertIn("last good snapshot", err.getvalue())
+        self.assertIn("'p'", err.getvalue())
 
     def test_a_project_removed_mid_refresh_does_not_raise_keyerror(self):
         # The refresh reads its specification from a captured value, so a reload that
@@ -471,6 +475,17 @@ class ReposHotReloadTests(unittest.TestCase):
         self._write({"p": {"url": other, "branch": "master"}})
         # No time has passed, so freshness alone would still serve the old corpus.
         self.assertEqual(corpus.get("wiki/x.md", _ctx("p"))["text"], "# From the other repo")
+
+    def test_a_repos_key_that_is_not_a_plain_name_is_refused(self):
+        # The key becomes the clone directory; a traversal or absolute key would
+        # point git's fetch and hard-reset outside the cache root.
+        for key in ("../other-repo", "/abs", "a/b", "..", "."):
+            with self.subTest(key=key):
+                self.repos_file.write_text(json.dumps({key: {"url": "x", "branch": "main"}}))
+                with self.assertRaises(ValueError):
+                    load_docs_repos(str(self.repos_file))
+        self.repos_file.write_text(json.dumps({"ok-name.v2": {"url": "x", "branch": "main"}}))
+        self.assertIn("ok-name.v2", load_docs_repos(str(self.repos_file)))
 
     def test_no_repos_file_means_no_reload_attempt(self):
         corpus = DocsCorpus({"p": {"url": self.remote, "branch": "master"}},

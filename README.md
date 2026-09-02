@@ -46,10 +46,11 @@ field, and errors never leak the existence of another tenant's data.
 
 ## Security model in one paragraph
 
-A bearer token carries no secrets in the string itself — it is an opaque handle
-resolved server-side to a set of claims (`project`, `issue_project`, `actor`,
-`roles`). Because the claims live on the server, renaming or re-scoping them
-needs no token re-mint. Writes additionally require a writer role
+A bearer token is an opaque handle resolved server-side to a set of claims
+(`project`, `issue_project`, `actor`, `roles`). The token string is still a
+secret — whoever holds it acts as that principal — but it encodes nothing, so
+the claims live on the server and renaming or re-scoping them needs no token
+re-mint. Writes additionally require a writer role
 (default-deny). Optional per-user credentials (a personal Redmine key or GitLab
 PAT) are held in an encrypted-at-rest keystore (AES-256-GCM) with the ciphertext
 bound to the owner and backend, so a credential cannot be replayed as another

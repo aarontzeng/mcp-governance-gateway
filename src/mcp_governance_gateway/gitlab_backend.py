@@ -175,7 +175,9 @@ class GitLabHttpBackend(IssueBackend):
     def add_note(self, issue_id: str, note: str, context: RequestContext) -> dict[str, Any]:
         token, personal = self._write_key(context)  # fail-loud early
         pid, _ = self._resolve_project(context)
-        self._get_issue_in_project(issue_id, pid)  # shared token: non-authorship verify
+        # Verify under the same token the write will use: the shared token
+        # must not vouch for an issue the personal PAT cannot read.
+        self._get_issue_in_project(issue_id, pid, token=token)
         self._request(
             "POST", f"/projects/{pid}/issues/{_iid(issue_id)}/notes",
             body={"body": _with_attribution(note, context, personal=personal)}, token=token,
@@ -202,7 +204,7 @@ class GitLabHttpBackend(IssueBackend):
         _reject_redmine_only(planning or {}, "update_status")
         token, personal = self._write_key(context)  # fail-loud early
         pid, _ = self._resolve_project(context)
-        self._get_issue_in_project(issue_id, pid)
+        self._get_issue_in_project(issue_id, pid, token=token)
         body: dict[str, Any] = {"state_event": event}
         if assignee is not None:
             key, value = _assignee_field(assignee)
@@ -294,11 +296,13 @@ class GitLabHttpBackend(IssueBackend):
         self._project_cache[key] = (pid, name)
         return pid, name
 
-    def _get_issue_in_project(self, issue_id: str, pid: int) -> dict[str, Any]:
+    def _get_issue_in_project(
+        self, issue_id: str, pid: int, *, token: str | None = None
+    ) -> dict[str, Any]:
         # The endpoint itself is project-scoped, so a foreign iid 404s naturally;
         # the explicit re-check guards against a confused/hostile backend.
         try:
-            issue = self._request("GET", f"/projects/{pid}/issues/{_iid(issue_id)}")
+            issue = self._request("GET", f"/projects/{pid}/issues/{_iid(issue_id)}", token=token)
         except IssueBackendError as exc:
             if exc.status == 404:
                 raise IssueBackendError("issue not found", status=404) from exc

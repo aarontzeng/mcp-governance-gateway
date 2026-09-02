@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -47,6 +48,7 @@ class BearerTokenAuthenticator:
         # without an adapter restart. Empty -> static (tests / no hot-reload).
         self._sources = sources or []
         self._mtimes = self._current_mtimes()
+        self._reload_lock = threading.Lock()
 
     @classmethod
     def from_file(cls, path: str | Path) -> "BearerTokenAuthenticator":
@@ -83,20 +85,26 @@ class BearerTokenAuthenticator:
     def _maybe_reload(self) -> None:
         if not self._sources:
             return
-        current = self._current_mtimes()
-        if current == self._mtimes:
+        if self._current_mtimes() == self._mtimes:
             return
-        try:
-            # _load_all builds a fresh dict and we rebind (never mutate the live map in
-            # place), so a concurrent authenticate under the threaded server always sees a
-            # complete map (old or new) without a lock.
-            self._token_claims = self._load_all(self._sources)
-        except Exception as exc:
-            # keep the last-good token map on a missing/partial/corrupt file so a bad
-            # write can never lock everyone out; retry on the next file change. Say so
-            # loudly: a revoke written into a corrupt file has NOT taken effect.
-            print(f"token file reload failed; keeping the last-good token set: {exc}", file=sys.stderr, flush=True)
-        self._mtimes = current
+        # Reloads are serialized, and the stat is repeated under the lock: two
+        # requests that both saw a changed file would otherwise each load it, and
+        # the one that loaded the OLDER version could publish last -- briefly
+        # re-admitting a token the newer version revoked. Reads take no lock:
+        # _load_all builds a fresh dict and we rebind (never mutate the live map in
+        # place), so a concurrent authenticate always sees a complete map.
+        with self._reload_lock:
+            current = self._current_mtimes()
+            if current == self._mtimes:
+                return
+            try:
+                self._token_claims = self._load_all(self._sources)
+            except Exception as exc:
+                # keep the last-good token map on a missing/partial/corrupt file so a bad
+                # write can never lock everyone out; retry on the next file change. Say so
+                # loudly: a revoke written into a corrupt file has NOT taken effect.
+                print(f"token file reload failed; keeping the last-good token set: {exc}", file=sys.stderr, flush=True)
+            self._mtimes = current
 
     def authenticate_header(self, authorization: str | None) -> Principal:
         self._maybe_reload()

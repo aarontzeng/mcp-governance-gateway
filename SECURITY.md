@@ -32,8 +32,11 @@ be adversarial or compromised, and that a token may be stolen. Its guarantees:
   owner and the backend, so a record cannot be re-purposed as another user's or
   another backend's credential; tampering the stored backend label fails closed.
 - **No secrets in transcripts or logs.** Tokens and credentials are never echoed
-  back; backend errors are normalized so they cannot leak another tenant's data
-  or confirm the existence of a resource in another project.
+  back, and the audit log records fixed names rather than caller-supplied
+  strings for refused tool names and artifact ids. Backend errors are
+  normalized so they cannot leak another tenant's data or confirm the existence
+  of a resource in another project — with one documented exception under
+  "Known limitations".
 
 ## What it does not defend
 
@@ -64,6 +67,21 @@ and docs results. A backend that ignores its own filter would leak across tenant
 through this one tool. `memory.action_update_status` checks the target's project
 by listing first and then updates by id, so a record re-homed between the two
 calls is updated on its new project.
+
+**Issue writes are check-then-write too.** `issues.add_note` and
+`issues.update_status` verify the issue's project with a read and then write
+by id; neither Redmine nor GitLab offers a conditional write, so an issue moved
+to another project between the two calls receives the write on its new
+project. The window is one round-trip and the write still lands under the
+caller's own credential when one is enrolled.
+
+**One 403 names a project the shared key can see.** When a caller's personal
+Redmine key is refused with 403 for an issue their own account cannot read, the
+gateway says so ("no access in this project") instead of the uniform "issue
+not found", because that message names the fixable cause. For an issue in
+another project that the shared key can read but the caller's cannot, this
+makes cross-project existence distinguishable — a subset of what the tracker
+already discloses to that same account directly.
 
 **Secret scanning is best-effort.** Memory writes are rejected when they contain
 a credential-shaped unbroken blob (a PEM key, a well-known token prefix, a JWT, a

@@ -121,15 +121,19 @@ gateway host being able to reach Redmine.
   key, the error names the action and, if `CREDENTIAL_PORTAL_URL` is configured,
   where to do it. The gateway never hardcodes a host: with the variable unset the
   message carries no URL rather than pointing at somewhere that does not exist.
-- **Credentials.** A single configured Redmine API key (`REDMINE_API_KEY`) is used
-  for now; a dedicated service account can replace it later (see "Write
-  Attribution"). The key stays server-side in `gateway.env`.
-- **Native attribution (lightweight).** Because writes use one backend credential,
-  each write stamps `[via mcp-governance-gateway | actor=<actor> | audit=<id>]` into
-  the Redmine text — the new issue's description, an added note, and a journal note
-  on a status change — so the Redmine record itself shows who acted through the
-  gateway. The gateway audit log remains authoritative. A later service-account +
-  `X-Redmine-Switch-User` mode can set the native author directly.
+- **Credentials.** Two kinds. The shared backend key (`REDMINE_API_KEY` /
+  `GITLAB_TOKEN`, server-side in `gateway.env`) serves reads and, unless
+  `REDMINE_ENFORCE_PERSONAL_KEY` / `GITLAB_ENFORCE_PERSONAL_KEY` is on, writes by callers who have not enrolled.
+  A caller who has enrolled a personal key in the keystore writes under it —
+  including the existence check that gates `add_note` / `update_status`, so the
+  shared key never vouches for an issue the caller's own account cannot read.
+- **Native attribution.** A write on the shared key stamps
+  `[via mcp-governance-gateway | actor=<actor> | audit=<id>]` into the tracker
+  text — the new issue's description, an added note, and a journal note on a
+  status change — so the record itself shows who acted through the gateway. A
+  write on a personal key is already attributed natively, so the stamp is
+  trimmed to `[via mcp-governance-gateway | audit=<id>]`. The gateway audit log
+  remains authoritative either way.
 - **Config.** `REDMINE_BASE_URL` / `REDMINE_API_KEY` / `REDMINE_TIMEOUT_SEC`, or
   the `GITLAB_*` equivalents with `ISSUE_BACKEND=gitlab` (ADR-0013). The backend
   is inert — its tools are not advertised — until its base URL is set. Every

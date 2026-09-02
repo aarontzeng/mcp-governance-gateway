@@ -153,14 +153,19 @@ class GatewayApp:
 
         gateway_request_id = str(uuid.uuid4())
         start = time.monotonic()
+        declared = _declared_arguments().get(name)
+        # An undeclared name is audited under a fixed label: the tool field is
+        # the one caller-chosen string that reaches the audit log verbatim, and a
+        # credential pasted there by mistake would sit in an append-only log
+        # forever. The caller still gets the name back in the error.
+        audit_name = name if declared is not None else "unknown"
         decision = self._policy.decide(name, principal)
         if not decision.allowed:
-            self._audit(name, principal, gateway_request_id, decision, "denied", start=start)
+            self._audit(audit_name, principal, gateway_request_id, decision, "denied", start=start)
             return _error(request_id, -32003, decision.reason)
-        declared = _declared_arguments().get(name)
         if declared is None:
             unknown = PolicyDecision("deny", "unknown tool")
-            self._audit(name, principal, gateway_request_id, unknown, "denied", start=start)
+            self._audit(audit_name, principal, gateway_request_id, unknown, "denied", start=start)
             return _error(request_id, -32602, f"Unknown tool: {name}")
 
         context = RequestContext.from_principal(principal, gateway_request_id)

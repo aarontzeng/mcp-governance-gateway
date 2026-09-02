@@ -120,6 +120,11 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 client="ci-artifact", request_id=request_id,
             )
 
+            # Recorded only once open_artifact has checked them against the
+            # allowlist and the build's own listing: until then job and path are
+            # whatever the caller typed, and the audit log is append-only.
+            resource_id: str | None = None
+
             def audit(outcome: str, reason: str = "", sent: int | None = None) -> None:
                 # Every MCP tool call is audited; without this the byte transfer was
                 # the one operation the gateway performed and did not record.
@@ -129,7 +134,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 sink.write(AuditEvent(
                     request_id=request_id, actor=principal.actor, project=principal.project,
                     tool="ci.artifact.download", decision="allow", outcome=outcome,
-                    reason=reason, resource_id=f"{job}:{rel_path}",
+                    reason=reason, resource_id=resource_id,
                     duration_ms=int((time.monotonic() - started) * 1000), bytes_sent=sent,
                 ))
 
@@ -145,6 +150,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     # open_artifact enforces the allowlist AND that this path is a real
                     # artifact of the build, which is what makes traversal impossible.
                     upstream = ci.open_artifact(job, build, rel_path, context)
+                    resource_id = f"{job}:{rel_path}"
                 except CiBackendError as exc:
                     audit("backend_error", str(exc))
                     self._send_json(int(exc.status or 502), {"error": str(exc)})
@@ -170,6 +176,13 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     self.send_header("X-Content-Type-Options", "nosniff")
                     if declared:
                         self.send_header("Content-Length", str(declared))
+                    else:
+                        # No length and no chunked encoding: the only valid HTTP/1.1
+                        # framing left is closing the connection at the end of the
+                        # body, and the client must be told so it does not wait on
+                        # a keep-alive connection for bytes that will never come.
+                        self.send_header("Connection", "close")
+                        self.close_connection = True
                     # send_header does no CRLF validation of its own -- it formats
                     # "<k>: <v>\r\n" and appends -- so a filename carrying a line break
                     # would emit attacker-chosen response headers. Whitelist instead of
@@ -181,8 +194,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                         chunk = upstream.read(STREAM_CHUNK)
                         if not chunk:
                             break
-                        sent += len(chunk)
-                        if sent > cap:
+                        if sent + len(chunk) > cap:
                             # An absent or dishonest Content-Length cannot buy an
                             # unbounded transfer. The headers are already out, so the
                             # only honest move is to stop: the client sees a short
@@ -191,6 +203,14 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                             self.close_connection = True
                             return
                         self.wfile.write(chunk)
+                        sent += len(chunk)   # counted once delivered, not once read
+                    if declared and sent != declared:
+                        # The upstream promised one length and delivered another. The
+                        # client's framing is now wrong either way, so close rather
+                        # than leave a keep-alive connection desynchronized.
+                        audit("interrupted", f"upstream sent {sent} of {declared} declared bytes", sent)
+                        self.close_connection = True
+                        return
                     audit("ok", "", sent)
                 except OSError:
                     # Client hung up or upstream dropped mid-stream: the headers are

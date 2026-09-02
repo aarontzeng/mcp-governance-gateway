@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -246,6 +248,23 @@ class GatewayAppTests(unittest.TestCase):
         self.assertIn("error", bad)
         self.assertEqual(len(self.backend.calls), n)  # not forwarded to the backend
 
+    def test_an_unknown_tool_name_is_audited_under_a_fixed_name(self) -> None:
+        # The tool field is the one caller-chosen string that would otherwise
+        # reach the append-only audit log verbatim; a credential mistaken for a
+        # tool name must not land there.
+        sentinel = "ghp_" + "S3CRET" * 6
+        bad = self.app.handle_rpc(
+            {"jsonrpc": "2.0", "id": 27, "method": "tools/call",
+             "params": {"name": sentinel, "arguments": {}}},
+            self.principal,
+        )
+        assert bad is not None
+        self.assertEqual(bad["error"]["code"], -32003)  # policy fails closed first
+        event = self.audit.events[-1]
+        self.assertEqual(event.tool, "unknown")
+        self.assertEqual(event.outcome, "denied")
+        self.assertNotIn(sentinel, json.dumps(event.to_json()))
+
     def test_an_argument_the_schema_does_not_declare_is_rejected(self) -> None:
         # `additionalProperties: false` is enforced by the gateway, not left to
         # the client: an undeclared key is -32602 and never reaches the backend.
@@ -275,7 +294,8 @@ class GatewayAppTests(unittest.TestCase):
         assert response is not None
         self.assertEqual(response["error"]["code"], -32003)
         self.assertEqual(self.backend.calls, [])
-        self.assertEqual(self.audit.events[0].tool, "memory.delete")
+        # undeclared names are audited under a fixed label, never verbatim
+        self.assertEqual(self.audit.events[0].tool, "unknown")
         self.assertEqual(self.audit.events[0].decision, "deny")
         self.assertEqual(self.audit.events[0].outcome, "denied")
 
@@ -906,7 +926,8 @@ class CiArtifactRouteTests(unittest.TestCase):
     PAYLOAD = b"IMAGEBYTES" * 20_000
 
     def _server(self, project="proj-a", artifact_path="out/image.bin",
-                max_bytes=None, max_concurrent=None, declare_length=True, block=None):
+                max_bytes=None, max_concurrent=None, declare_length=True, block=None,
+                declared_length=None):
         import threading
         import time
 
@@ -946,7 +967,10 @@ class CiArtifactRouteTests(unittest.TestCase):
         reads, closed = self.reads, self.closed
 
         class _Upstream:
-            headers = ({"Content-Type": "application/octet-stream", "Content-Length": str(len(payload))}
+            # `declared_length` lets a test make the upstream promise a length it
+            # does not deliver.
+            headers = ({"Content-Type": "application/octet-stream",
+                        "Content-Length": str(declared_length if declared_length is not None else len(payload))}
                        if declare_length else {"Content-Type": "application/octet-stream"})
 
             def __init__(self):
@@ -1048,6 +1072,17 @@ class CiArtifactRouteTests(unittest.TestCase):
                 response, _ = self._get(port, "job=swarm-build&path=" + path)
                 self.assertEqual(response.status, 404)
 
+    def test_a_refused_job_or_path_is_not_written_into_the_audit_log(self) -> None:
+        # Until open_artifact has validated them, job and path are whatever the
+        # caller typed; the audit log records the refusal, not the typed string.
+        port = self._server()
+        response, _ = self._get(port, "job=swarm-build&path=out/" + "glpat-" + "x1" * 12)
+        self.assertEqual(response.status, 404)
+        event = self.audit.events[-1]
+        self.assertEqual(event.outcome, "backend_error")
+        self.assertIsNone(event.resource_id)
+        self.assertNotIn("glpat-", json.dumps(event.to_json()))
+
     def test_the_transfer_itself_is_audited(self) -> None:
         # Design review, 2026-08-10: every MCP tool call was audited, and the one
         # operation that moved bytes was not -- the record showed only the preceding
@@ -1077,7 +1112,34 @@ class CiArtifactRouteTests(unittest.TestCase):
             self._get(port, "job=swarm-build&build=291&path=out/image.bin")
         except Exception:
             pass  # a truncated response is the point; the client may see a short read
-        self.assertEqual(self.audit.events[-1].outcome, "truncated")
+        event = self.audit.events[-1]
+        self.assertEqual(event.outcome, "truncated")
+        # bytes_sent counts what was written, so it can never exceed the cap the
+        # stream was stopped at.
+        self.assertLessEqual(event.bytes_sent, 100_000)
+
+    def test_an_upstream_without_a_length_is_close_delimited(self) -> None:
+        # HTTP/1.1 with neither Content-Length nor chunked encoding has exactly one
+        # valid framing left: the body ends when the connection closes. Without
+        # announcing that, a keep-alive client waits for bytes that never come.
+        port = self._server(declare_length=False)
+        response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(response.getheader("Content-Length"))
+        self.assertEqual((response.getheader("Connection") or "").lower(), "close")
+        self.assertEqual(body, self.PAYLOAD)
+        self.assertEqual(self.audit.events[-1].outcome, "ok")
+
+    def test_an_upstream_that_delivers_less_than_it_declared_is_not_audited_ok(self) -> None:
+        port = self._server(declared_length=len(self.PAYLOAD) + 1000)
+        try:
+            self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        except Exception:
+            pass  # the client sees an incomplete read; that is the upstream's doing
+        event = self.audit.events[-1]
+        self.assertEqual(event.outcome, "interrupted")
+        self.assertIn("declared", event.reason)
+        self.assertEqual(event.bytes_sent, len(self.PAYLOAD))
 
     def test_concurrent_streams_are_capped(self) -> None:
         # A stream holds a thread and an upstream connection for its whole duration,
@@ -2401,6 +2463,45 @@ class MultiFileTokenReloadTests(unittest.TestCase):
             self._bump_mtime(user)
             with self.assertRaises(AuthError):
                 auth.authenticate_header("Bearer usr")  # revoked token rejected after reload
+            self.assertEqual(auth.authenticate_header("Bearer svc").project, "x")
+
+    def test_two_overlapping_reloads_cannot_publish_the_older_file_last(self) -> None:
+        # Thread 1 sees the file change and reads version B (usr still valid); before
+        # it can publish, version C (usr revoked) lands and thread 2 reads and
+        # publishes it. Thread 1 must not then overwrite C with B: a revoked token
+        # would authenticate until the next reload. Asserted on the live map, not
+        # through authenticate_header, which would repair it by reloading again.
+        with tempfile.TemporaryDirectory() as d:
+            base, user = Path(d) / "base.json", Path(d) / "user.json"
+            self._write(base, [{"token": "svc", "actor": "gw", "project": "x", "roles": []}])
+            self._write(user, [])
+            auth = BearerTokenAuthenticator.from_files([(base, True), (user, False)])
+            self._write(user, [{"token": "usr", "actor": "a@x", "project": "x", "roles": []}])  # version B
+            self._bump_mtime(user)
+            real_load = BearerTokenAuthenticator._load_all
+            first_read_done, second_published = threading.Event(), threading.Event()
+            calls = []
+
+            def slow_first_load(sources):
+                loaded = real_load(sources)
+                calls.append(1)
+                if len(calls) == 1:
+                    first_read_done.set()
+                    second_published.wait(0.5)   # give a racing reload time to publish C
+                return loaded
+
+            with mock.patch.object(BearerTokenAuthenticator, "_load_all", staticmethod(slow_first_load)):
+                t1 = threading.Thread(target=auth._maybe_reload)
+                t1.start()
+                self.assertTrue(first_read_done.wait(5))
+                self._write(user, [])                          # version C: usr revoked
+                os.utime(user, (time.time() + 10, time.time() + 10))
+                t2 = threading.Thread(target=auth._maybe_reload)
+                t2.start()
+                t2.join(5)
+                second_published.set()
+                t1.join(5)
+            self.assertNotIn("usr", auth._token_claims)
             self.assertEqual(auth.authenticate_header("Bearer svc").project, "x")
 
     def test_reload_recovers_after_corrupt(self) -> None:

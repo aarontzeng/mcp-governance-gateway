@@ -153,9 +153,10 @@ class PersonalTokenTests(unittest.TestCase):
         self.assertEqual(fake.tokens[-1], "PAT-OF-USER")          # write on the personal PAT
         self.assertNotIn("actor=", body["body"])                   # personal → footer trimmed to audit id
         self.assertIn("audit=req-9", body["body"])
-        # non-authorship verify stayed on the shared token (token=None → default)
+        # the existence verify runs under the SAME personal PAT as the write:
+        # the shared token must not vouch for an issue the caller cannot read
         verify_idx = [i for i, (m, p, _, _) in enumerate(fake.calls) if p == "/projects/42/issues/7"][0]
-        self.assertIsNone(fake.tokens[verify_idx])
+        self.assertEqual(fake.tokens[verify_idx], "PAT-OF-USER")
 
     def test_enforced_without_key_fails_428(self):
         fake = FakeGitLab()

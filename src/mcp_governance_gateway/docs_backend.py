@@ -30,6 +30,7 @@ from typing import Any
 from .memory_backend import ActorLabels, RequestContext, _display_actor
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
+_PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9._-]+")
 _CJK_RE = re.compile("[\\u3400-\\u9fff]")
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.M)
@@ -356,7 +357,14 @@ class DocsCorpus:
                 stale = self._snapshots.get(spec.project)
                 if stale is not None and stale.spec == spec.fingerprint:
                     # A pull hiccup against the SAME repository: serving the last good
-                    # snapshot is a freshness compromise the reader can live with.
+                    # snapshot is a freshness compromise the reader can live with --
+                    # said on the operator's log, since the reader cannot tell, and
+                    # a repository that keeps failing should not stay quiet.
+                    print(
+                        f"docs corpus refresh failed for project {spec.project!r}; "
+                        "serving the last good snapshot until the next pull interval",
+                        file=sys.stderr, flush=True,
+                    )
                     stale.refreshed_at = time.monotonic()
                     return stale
                 # A different specification, though, means the old snapshot is another
@@ -556,6 +564,11 @@ def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
         raise ValueError("docs repos file must be a JSON object of project -> {url, branch}")
     repos: dict[str, dict[str, str]] = {}
     for project, spec in data.items():
+        # The key names the clone directory under the cache root, so it must be a
+        # single path component: a key like "../other" would make the gateway fetch
+        # into -- and hard-reset -- a checkout outside the cache.
+        if not _PROJECT_KEY_RE.fullmatch(str(project)) or str(project) in (".", ".."):
+            raise ValueError(f"docs repo key {project!r} must be a plain name (letters, digits, . _ -)")
         if not isinstance(spec, dict) or not spec.get("url"):
             raise ValueError(f"docs repo entry for {project!r} needs a url")
         repos[str(project)] = {"url": str(spec["url"]), "branch": str(spec.get("branch", "master"))}

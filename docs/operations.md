@@ -60,7 +60,9 @@ Rotation must not require changing backend issue tracker or memory credentials.
 
 What the token model does and does not give you. Tokens are opaque values
 matched server-side against a file, so the claims can be re-scoped without
-re-minting anything, and the token string itself carries no secret to leak.
+re-minting anything. The token string is a bearer secret all the same: it
+encodes nothing, but anyone holding it acts as that principal, so it is
+handled like a password (never logged, never pasted into transcripts).
 Token files are watched by `(mtime, size, inode)` and reloaded on change, so a
 mint or a revoke takes effect without a restart — keyed on inode as well as
 mtime because an atomic write swaps the inode, and two writes in the same
