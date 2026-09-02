@@ -161,9 +161,11 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 sent = 0
                 try:
                     self.send_response(HTTPStatus.OK)
-                    self.send_header(
-                        "Content-Type", upstream.headers.get("Content-Type") or "application/octet-stream"
-                    )
+                    # Always a download, never a document: the upstream type is
+                    # whatever the build wrote, and a text/html artifact rendered
+                    # in a browser on this origin would run with this origin.
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("X-Content-Type-Options", "nosniff")
                     if declared:
                         self.send_header("Content-Length", str(declared))
                     # send_header does no CRLF validation of its own -- it formats

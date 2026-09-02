@@ -245,6 +245,21 @@ class GatewayAppTests(unittest.TestCase):
         self.assertIn("error", bad)
         self.assertEqual(len(self.backend.calls), n)  # not forwarded to the backend
 
+    def test_an_argument_the_schema_does_not_declare_is_rejected(self) -> None:
+        # `additionalProperties: false` is enforced by the gateway, not left to
+        # the client: an undeclared key is -32602 and never reaches the backend.
+        n = len(self.backend.calls)
+        bad = self.app.handle_rpc(
+            {"jsonrpc": "2.0", "id": 26, "method": "tools/call",
+             "params": {"name": "memory.search", "arguments": {"query": "x", "project": "other"}}},
+            self.principal,
+        )
+        assert bad is not None
+        self.assertEqual(bad["error"]["code"], -32602)
+        self.assertIn("project", bad["error"]["message"])
+        self.assertEqual(len(self.backend.calls), n)
+        self.assertEqual(self.audit.events[-1].outcome, "invalid")
+
     def test_disallowed_tool_fails_closed(self) -> None:
         response = self.app.handle_rpc(
             {
@@ -916,6 +931,7 @@ class CiArtifactRouteTests(unittest.TestCase):
             **({"ci_artifact_max_concurrent": max_concurrent} if max_concurrent else {}),
         )
         srv = build_server(settings)
+        self.srv = srv
         self.audit = ListAuditSink()
         srv.audit_sink = self.audit
 
@@ -978,6 +994,31 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertGreater(len([n for n in self.reads if n > 0]), 1)
         self.assertTrue(self.closed)
 
+
+    def test_the_upstream_content_type_is_never_forwarded(self) -> None:
+        # An artifact declared text/html by the build must not render on this
+        # origin: the type is fixed and sniffing is disabled.
+        port = self._server()
+        orig_open = self.srv.ci_backend._open
+        length = str(len(self.PAYLOAD))
+
+        class _Html:
+            headers = {"Content-Type": "text/html; charset=utf-8", "Content-Length": length}
+
+            def __init__(self):
+                self._inner = orig_open(None)
+
+            def read(self, n):
+                return self._inner.read(n)
+
+            def close(self):
+                self._inner.close()
+
+        self.srv.ci_backend._open = lambda path: _Html()  # type: ignore[method-assign]
+        response, _body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "application/octet-stream")
+        self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
     def test_a_filename_cannot_inject_response_headers(self) -> None:
         # Adversarial review, 2026-08-10: send_header does no CRLF validation, so a
         # listed basename containing a line break emitted attacker-chosen headers.

@@ -170,6 +170,13 @@ class DocsCorpus:
     """Per-project corpora. `repos` maps project -> {"url": ..., "branch": ...}."""
 
     SERVED_DIRS = ("raw/", "wiki/")
+    # Corpus caps, checked from the tree listing before any content is read. A
+    # docs repository is reviewed prose, so these are far above any real corpus
+    # and still small enough that one runaway repository cannot exhaust the
+    # gateway's memory on refresh. Exceeding one fails the refresh (503).
+    MAX_DOCS = 5000
+    MAX_DOC_BYTES = 2 * 1024 * 1024
+    MAX_CORPUS_BYTES = 64 * 1024 * 1024
 
     def __init__(
         self,
@@ -343,7 +350,7 @@ class DocsCorpus:
                 return cached
             try:
                 snap = self._refresh(spec)
-            except subprocess.CalledProcessError as exc:
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
                 stale = self._snapshots.get(spec.project)
                 if stale is not None and stale.spec == spec.fingerprint:
                     # A pull hiccup against the SAME repository: serving the last good
@@ -353,7 +360,8 @@ class DocsCorpus:
                 # A different specification, though, means the old snapshot is another
                 # corpus. Unavailable is the honest answer; quietly serving the
                 # previous repository's documents would not be.
-                detail = (exc.stderr or b"").decode(errors="replace").strip()
+                stderr = exc.stderr if isinstance(exc.stderr, bytes) else b""
+                detail = stderr.decode(errors="replace").strip() or "git timed out"
                 raise DocsBackendError(f"docs corpus unavailable: {detail[:200]}", status=503) from exc
             # Resolved before taking the snapshot lock, so no lock is ever held while
             # another is acquired.
@@ -416,21 +424,44 @@ class DocsCorpus:
         )
 
     def _load_docs(self, dest: str) -> dict[str, _Doc]:
-        listing = self._git(dest, "ls-files", "-z").split("\0")
-        authors = self._file_authors(dest)
-        docs: dict[str, _Doc] = {}
-        for rel in listing:
-            if not rel or not rel.endswith(".md"):
+        # Read the tree, not the working directory. `ls-tree` carries each entry's
+        # mode, so symlinks (120000) and submodules (160000) are dropped before
+        # anything is opened: `open()` on a checked-out symlink follows it, and a
+        # docs commit could point `wiki/x.md` at any file on the gateway host.
+        # Content then comes from the object store by blob id, so no path under
+        # the clone is ever opened by name.
+        listing = self._git(dest, "ls-tree", "-r", "-l", "-z", "HEAD").split("\0")
+        wanted: list[tuple[str, str, int]] = []
+        total = 0
+        for entry in listing:
+            info, _, rel = entry.partition("\t")
+            fields = info.split()
+            if len(fields) != 4 or not rel:
                 continue
-            if not rel.startswith(self.SERVED_DIRS):
+            mode, kind, oid, size = fields
+            if kind != "blob" or mode not in ("100644", "100755"):
+                continue
+            if not rel.endswith(".md") or not rel.startswith(self.SERVED_DIRS):
                 continue
             if any(part.startswith(".") for part in PurePosixPath(rel).parts):
                 continue
-            try:
-                with open(os.path.join(dest, rel), encoding="utf-8", errors="replace") as fh:
-                    raw = fh.read()
-            except OSError:
-                continue
+            nbytes = int(size)
+            if nbytes > self.MAX_DOC_BYTES:
+                raise DocsBackendError(
+                    f"docs corpus exceeds limits: {rel} is {nbytes} bytes", status=503)
+            total += nbytes
+            wanted.append((rel, oid, nbytes))
+        if len(wanted) > self.MAX_DOCS:
+            raise DocsBackendError(
+                f"docs corpus exceeds limits: {len(wanted)} documents", status=503)
+        if total > self.MAX_CORPUS_BYTES:
+            raise DocsBackendError(
+                f"docs corpus exceeds limits: {total} bytes of markdown", status=503)
+        blobs = self._read_blobs(dest, wanted)
+        authors = self._file_authors(dest)
+        docs: dict[str, _Doc] = {}
+        for rel, oid, _nbytes in wanted:
+            raw = blobs[oid].decode("utf-8", errors="replace")
             meta, body = parse_frontmatter(raw)
             # The frontmatter parser is general, so `title: [a, b]` legitimately
             # parses to a list; this consumer needs a string and says so, rather
@@ -446,6 +477,27 @@ class DocsCorpus:
                 created_by=created_by, updated_by=updated_by,
             )
         return docs
+
+    def _read_blobs(self, dest: str, wanted: list[tuple[str, str, int]]) -> dict[str, bytes]:
+        """Blob contents by object id, in one `cat-file --batch` round trip.
+
+        The batch output is `<oid> blob <size>\n<content>\n` per request, framed by
+        the size in bytes, so it is parsed as bytes and decoded per document."""
+        if not wanted:
+            return {}
+        request = "".join(f"{oid}\n" for _rel, oid, _size in wanted).encode("ascii")
+        out = self._git(dest, "cat-file", "--batch", input=request, raw=True)
+        blobs: dict[str, bytes] = {}
+        pos = 0
+        for rel, oid, _size in wanted:
+            end = out.find(b"\n", pos)
+            header = out[pos:end].decode("ascii", errors="replace").split() if end >= 0 else []
+            if len(header) != 3 or header[0] != oid or header[1] != "blob":
+                raise DocsBackendError(f"docs corpus unreadable: {rel}", status=503)
+            nbytes = int(header[2])
+            blobs[oid] = out[end + 1:end + 1 + nbytes]
+            pos = end + 1 + nbytes + 1
+        return blobs
 
     def _file_authors(self, dest: str) -> dict[str, tuple[str, str]]:
         """Current-path creator/updater names, from the complete Git log.
@@ -476,11 +528,13 @@ class DocsCorpus:
                 created[rel] = author
         return {path: (creator, updated[path]) for path, creator in created.items() if path in updated}
 
-    def _git(self, cwd: str | None, *args: str) -> str:
+    def _git(self, cwd: str | None, *args: str, input: bytes | None = None, raw: bool = False):
         out = subprocess.run(
             ["git", "-c", "core.quotePath=false", *args],
-            cwd=cwd, capture_output=True, check=True, timeout=self._git_timeout,
+            cwd=cwd, capture_output=True, check=True, timeout=self._git_timeout, input=input,
         )
+        if raw:
+            return out.stdout
         return out.stdout.decode("utf-8", errors="surrogateescape")
 
 

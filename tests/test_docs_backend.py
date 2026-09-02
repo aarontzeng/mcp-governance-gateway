@@ -623,5 +623,98 @@ class GatewayDocsTests(unittest.TestCase):
         self.assertNotIn("docs.get", without)
 
 
+class TreeReadTests(unittest.TestCase):
+    """The corpus is read from the git tree, never from the checked-out paths.
+
+    A docs commit is authored by whoever can push to the docs repository, which
+    is a wider set than whoever administers the gateway host, so a symlink
+    committed as `wiki/x.md` must not be followed into the host filesystem."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.host_secret = Path(self.tmp) / "host-secret.txt"
+        self.host_secret.write_text("HOST-ONLY-CONTENT\n", encoding="utf-8")
+        self.remote = _make_remote(self.tmp, "tree-docs", {"wiki/index.md": "# Index\n"})
+        self.work = str(Path(self.tmp) / "tree-docs-work")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _corpus(self):
+        return DocsCorpus(
+            {"p": {"url": self.remote, "branch": "master"}},
+            str(Path(self.tmp) / "clones"), pull_interval_sec=0.0,
+        )
+
+    def _push(self, message):
+        _sh(self.work, "git", "add", "-A")
+        _sh(self.work, "git", "commit", "-qm", message)
+        _sh(self.work, "git", "push", "-q", "origin", "master")
+
+    def test_a_committed_symlink_is_not_followed_and_is_not_a_document(self):
+        (Path(self.work) / "wiki" / "leak.md").symlink_to(self.host_secret)
+        self._push("add symlink")
+        corpus = self._corpus()
+        paths = {d["path"] for d in corpus.list(_ctx("p"))["documents"]}
+        self.assertEqual(paths, {"wiki/index.md"})
+        with self.assertRaises(DocsBackendError) as cm:
+            corpus.get("wiki/leak.md", _ctx("p"))
+        self.assertEqual(cm.exception.status, 404)
+        self.assertEqual(corpus.search("HOST-ONLY-CONTENT", 10, _ctx("p"))["results"], [])
+
+    def test_a_symlinked_directory_is_not_traversed(self):
+        (Path(self.work) / "wiki" / "outside").symlink_to(Path(self.tmp))
+        self._push("add dir symlink")
+        paths = {d["path"] for d in self._corpus().list(_ctx("p"))["documents"]}
+        self.assertEqual(paths, {"wiki/index.md"})
+
+    def test_an_oversized_document_fails_the_refresh_loudly(self):
+        corpus = self._corpus()
+        corpus.MAX_DOC_BYTES = 4
+        with self.assertRaises(DocsBackendError) as cm:
+            corpus.list(_ctx("p"))
+        self.assertEqual(cm.exception.status, 503)
+        self.assertIn("exceeds limits", str(cm.exception))
+
+    def test_a_corpus_with_too_many_documents_fails_the_refresh_loudly(self):
+        _write_files(self.work, {"wiki/second.md": "# Two\n"})
+        self._push("second doc")
+        corpus = self._corpus()
+        corpus.MAX_DOCS = 1
+        with self.assertRaises(DocsBackendError) as cm:
+            corpus.list(_ctx("p"))
+        self.assertEqual(cm.exception.status, 503)
+
+    def test_a_corpus_over_the_total_byte_cap_fails_the_refresh_loudly(self):
+        corpus = self._corpus()
+        corpus.MAX_CORPUS_BYTES = 4
+        with self.assertRaises(DocsBackendError) as cm:
+            corpus.list(_ctx("p"))
+        self.assertEqual(cm.exception.status, 503)
+
+    def test_a_git_timeout_is_reported_as_unavailable_not_a_crash(self):
+        corpus = self._corpus()
+        original = corpus._git
+
+        def hang(cwd, *args, **kwargs):
+            if args and args[0] == "clone":
+                raise subprocess.TimeoutExpired("git", 30)
+            return original(cwd, *args, **kwargs)
+
+        corpus._git = hang
+        with self.assertRaises(DocsBackendError) as cm:
+            corpus.list(_ctx("p"))
+        self.assertEqual(cm.exception.status, 503)
+        self.assertIn("timed out", str(cm.exception))
+
+    def test_content_with_multibyte_text_survives_the_batch_read(self):
+        _write_files(self.work, {"wiki/cjk.md": "# 中文標題\n\n內容 — with dash\n"})
+        self._push("cjk")
+        doc = self._corpus().get("wiki/cjk.md", _ctx("p"))
+        self.assertEqual(doc["title"], "中文標題")
+        self.assertIn("內容 — with dash", doc["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

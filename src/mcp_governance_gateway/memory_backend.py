@@ -342,9 +342,14 @@ class HttpMemoryBackend(MemoryBackend):
         # so WITHOUT a project pre-check a caller could flip another project's action.
         # Verify the target belongs to the caller's project first — mirrors issues.* where
         # get/update verify the issue belongs to the token's project (cross-project => 404).
+        # The project is checked on each row as well as sent as a filter: the
+        # filter is the backend's promise, the row check is this side's own.
         raw = self._get(self._action_path, {"project": context.project})
         items = raw.get("actions") if isinstance(raw, dict) else None
-        if not isinstance(items, list) or not any(isinstance(a, dict) and a.get("id") == action_id for a in items):
+        if not isinstance(items, list) or not any(
+            isinstance(a, dict) and a.get("id") == action_id and a.get("project") == context.project
+            for a in items
+        ):
             raise MemoryBackendError("action not found in project", status=404)
         response = self._post(self._action_path.rstrip("/") + "/update", {"actionId": action_id, "status": status})
         action = response.get("action") if isinstance(response, dict) else None

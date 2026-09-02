@@ -156,13 +156,19 @@ class GatewayApp:
         if not decision.allowed:
             self._audit(name, principal, gateway_request_id, decision, "denied", start=start)
             return _error(request_id, -32003, decision.reason)
-        if name not in {tool["name"] for tool in tool_definitions()}:
+        declared = _declared_arguments().get(name)
+        if declared is None:
             unknown = PolicyDecision("deny", "unknown tool")
             self._audit(name, principal, gateway_request_id, unknown, "denied", start=start)
             return _error(request_id, -32602, f"Unknown tool: {name}")
 
         context = RequestContext.from_principal(principal, gateway_request_id)
         try:
+            # Every schema says `additionalProperties: false`; enforce it here so an
+            # argument the schema does not name is refused rather than ignored.
+            undeclared = sorted(key for key in arguments if key not in declared)
+            if undeclared:
+                raise ValueError(f"unknown argument(s) for {name}: {', '.join(undeclared)}")
             if name in _ISSUE_TOOLS:
                 result = self._call_issue_tool(name, arguments, principal, context)
             elif name in _DOCS_TOOLS:
@@ -455,6 +461,20 @@ class GatewayApp:
                 duration_ms=duration_ms,
             )
         )
+
+
+_DECLARED_ARGUMENTS: dict[str, frozenset[str]] | None = None
+
+
+def _declared_arguments() -> dict[str, frozenset[str]]:
+    """Tool name -> the argument names its input schema declares, built once."""
+    global _DECLARED_ARGUMENTS
+    if _DECLARED_ARGUMENTS is None:
+        _DECLARED_ARGUMENTS = {
+            tool["name"]: frozenset(tool["inputSchema"].get("properties", {}))
+            for tool in tool_definitions()
+        }
+    return _DECLARED_ARGUMENTS
 
 
 def tool_definitions() -> list[dict[str, Any]]:
