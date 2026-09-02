@@ -83,8 +83,9 @@ unreadable leaves the previously loaded claims live, so an emergency revoke that
 corrupts or truncates the file may not take effect. Verify a revoke by observing a
 rejection, not by observing that the file changed. In optional per-user credential
 mode, an unavailable keystore fails closed for reads whose meaning is the caller's
-identity (`issues.mine`, and any read by an enrolled caller) and for writes when
-`REDMINE_ENFORCE_PERSONAL_KEY` is set; otherwise writes fall back to the shared
+identity (`issues.mine` on both trackers; on Redmine also any read by an enrolled
+caller, which is routed on their own key) and for writes when the backend's
+enforce-personal-key switch is set; otherwise writes fall back to the shared
 backend credential, so native authorship becomes the service account's while the
 attribution footer still names the real actor.
 

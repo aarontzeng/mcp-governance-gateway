@@ -450,7 +450,9 @@ class ReposHotReloadTests(unittest.TestCase):
     def test_a_corrupt_write_keeps_the_last_good_map(self):
         # A bad save must not take every project's docs tools down.
         self.repos_file.write_text("{ this is not json", encoding="utf-8")
-        self.assertTrue(self.corpus.has_project("p"))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertTrue(self.corpus.has_project("p"))
+        self.assertIn("docs repos file reload failed", err.getvalue())  # but not silently
 
     def test_a_changed_url_retargets_the_existing_clone(self):
         # Hot-reloading the map is not enough on its own: the clone on disk still has

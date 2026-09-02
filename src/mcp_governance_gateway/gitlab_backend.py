@@ -93,6 +93,16 @@ class GitLabHttpBackend(IssueBackend):
         state, personal = self._key_resolver(context.actor)
         if state is KeyState.OK and personal:
             return personal, True
+        if state is KeyState.DEGRADED and self._enforce_personal:
+            # Same promise as the Redmine backend: enforced mode said writes carry the
+            # caller's own token, and a degraded store cannot deliver that. Telling
+            # the caller to enroll would send them to fix a server-side condition.
+            raise IssueBackendError(
+                "the credential store is temporarily unusable and this gateway enforces personal-token "
+                "writes; re-enrolling is not the fix and would be refused -- operators can see it "
+                "on /healthz",
+                status=503,
+            )
         if state is KeyState.UNDECRYPTABLE:
             raise IssueBackendError(
                 "your personal GitLab token could not be decrypted (the keystore may have been rotated); "
@@ -235,6 +245,14 @@ class GitLabHttpBackend(IssueBackend):
                 status=428,
             )
         state, personal = self._key_resolver(context.actor)
+        if state is KeyState.DEGRADED:
+            raise IssueBackendError(
+                "the credential store is temporarily unusable, so the gateway cannot tell which issues "
+                "are yours; answering from the shared token would return its issues as if they were "
+                "yours. Re-enrolling is not the fix and would be refused -- operators can see it "
+                "on /healthz",
+                status=503,
+            )
         if state is KeyState.UNDECRYPTABLE:
             raise IssueBackendError(
                 "your personal GitLab token could not be decrypted (the keystore may have been rotated); "

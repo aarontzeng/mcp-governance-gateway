@@ -173,6 +173,25 @@ class PersonalTokenTests(unittest.TestCase):
             fake.add_note("7", "x", _ctx())
         self.assertEqual(cm.exception.status, 409)
 
+    def test_degraded_store_is_a_503_not_an_enrollment_prompt(self):
+        # A degraded keystore is a server-side condition; the Redmine backend says
+        # so with a 503, and telling a GitLab caller to "enroll" would send them to
+        # fix something they cannot. Enforced writes and issues.mine both fail
+        # closed the same way; an optional-mode write still falls back (attributed).
+        fake = FakeGitLab()
+        fake._key_resolver = lambda actor: (KeyState.DEGRADED, None)
+        fake._enforce_personal = True
+        with self.assertRaises(IssueBackendError) as cm:
+            fake.create({"subject": "x"}, _ctx())
+        self.assertEqual(cm.exception.status, 503)
+        self.assertNotIn("enroll it", str(cm.exception))
+        with self.assertRaises(IssueBackendError) as cm:
+            fake.mine(10, _ctx())
+        self.assertEqual(cm.exception.status, 503)
+        self.assertEqual(fake.calls, [])
+        fake._enforce_personal = False
+        self.assertEqual(fake._write_key(_ctx()), (fake._token, False))
+
     def test_verify_key_shape_matches_redmine(self):
         fake = FakeGitLab({("GET", "/user"): {"id": 9, "username": "alice", "email": "alice@example.com"}})
         out = fake.verify_key("PAT")

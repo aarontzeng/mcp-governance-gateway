@@ -135,8 +135,10 @@ class RedmineKeyStore:
             self._records = recs if isinstance(recs, dict) else {}
         except OSError:
             self._records = {}  # absent file -> empty store (everyone MISSING)
-        except Exception:
-            pass  # keep last-good on a corrupt/partial file; retry on next change
+        except Exception as exc:
+            # keep last-good on a corrupt/partial file; retry on next change -- and say
+            # so, because a revoke written into that file has not taken effect.
+            print(f"credential store reload failed; keeping the last-good records: {exc}", file=sys.stderr, flush=True)
         self._sig = sig
 
     def get(self, actor: str, backend: str = "redmine") -> tuple[KeyState, str | None]:

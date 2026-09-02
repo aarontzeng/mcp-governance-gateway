@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -111,6 +113,20 @@ class RedmineKeyStoreTests(unittest.TestCase):
         self.assertTrue(ks.clear(_ACTOR))
         self.assertEqual(ks.get(_ACTOR), (KeyState.MISSING, None))
         self.assertFalse(ks.clear(_ACTOR))  # idempotent
+
+    def test_a_corrupt_write_keeps_the_last_good_records_and_says_so(self):
+        # A bad save must not lock everyone out -- and must not be silent either,
+        # because a revoke written into that file has not taken effect.
+        ks = self.store()
+        ks.set(_ACTOR, "secretkey", "jdoe")
+        self.path.write_text("{ not valid json", encoding="utf-8")
+        future = os.stat(self.path).st_mtime + 5
+        os.utime(self.path, (future, future))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            state, key = ks.get(_ACTOR)
+        self.assertEqual((state, key), (KeyState.OK, "secretkey"))
+        self.assertIn("credential store reload failed", err.getvalue())
+        self.assertNotIn("secretkey", err.getvalue())
 
     def test_nonce_unique_for_same_plaintext(self):
         ks = self.store()

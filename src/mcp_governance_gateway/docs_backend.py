@@ -237,10 +237,11 @@ class DocsCorpus:
                 return self._registry
             try:
                 repos = load_docs_repos(self._repos_file)
-            except Exception:
+            except Exception as exc:
                 # Keep the last-good map on a missing/partial/corrupt write, so a bad
                 # save can never take every project's docs tools down. The signature
                 # advances regardless, so a failed parse is not retried on every call.
+                print(f"docs repos file reload failed; keeping the last-good map: {exc}", file=sys.stderr, flush=True)
                 self._registry = _Registry(self._registry.generation, self._registry.repos, signature)
                 return self._registry
             self._registry = _Registry(self._registry.generation + 1, repos, signature)
