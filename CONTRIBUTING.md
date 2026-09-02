@@ -41,3 +41,9 @@ inert unless its configuration is present.
 ## Commit messages
 
 Explain *why*, not just *what*. Reference the ADR a change implements or amends.
+Add a line under `[Unreleased]` in `CHANGELOG.md` for anything a deployer would
+notice.
+
+## Conduct
+
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).

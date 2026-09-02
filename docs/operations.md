@@ -196,9 +196,16 @@ the host.
   but **only for the same repository**. Changing a project's url or branch makes
   the cached corpus ineligible immediately, so a retarget does not wait out the
   interval.
-- A fetch failure against the same repository serves the last good snapshot. A
-  fetch failure on a **newly changed** specification returns 503 instead: there is
-  no snapshot for it yet, and the one on disk belongs to the old repository.
+- A fetch failure (or a git timeout) against the same repository serves the last
+  good snapshot. A fetch failure on a **newly changed** specification returns 503
+  instead: there is no snapshot for it yet, and the one on disk belongs to the
+  old repository.
+- Documents are read from the git tree, not the checkout: only regular-file
+  blobs count, so a committed symlink or submodule is neither followed nor
+  listed. A corpus over the caps (5,000 markdown documents, 2 MiB per document,
+  64 MiB in total) fails every docs call with a 503 naming the limit until the
+  repository is brought back under it; the caps are class attributes on
+  `DocsCorpus` for a deployment that must raise them.
 - Refresh is per project: one project's slow clone or unreachable remote does not
   block another project's docs calls. Monitor snapshot age per project rather than
   a single global figure.

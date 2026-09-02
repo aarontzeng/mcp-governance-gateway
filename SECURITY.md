@@ -68,8 +68,11 @@ until that state moves to shared storage.
 unreadable leaves the previously loaded claims live, so an emergency revoke that
 corrupts or truncates the file may not take effect. Verify a revoke by observing a
 rejection, not by observing that the file changed. In optional per-user credential
-mode, an unavailable keystore falls back to the shared backend credential: writes
-continue, but native authorship silently becomes the service account's.
+mode, an unavailable keystore fails closed for reads whose meaning is the caller's
+identity (`issues.mine`, and any read by an enrolled caller) and for writes when
+`REDMINE_ENFORCE_PERSONAL_KEY` is set; otherwise writes fall back to the shared
+backend credential, so native authorship becomes the service account's while the
+attribution footer still names the real actor.
 
 **Identity propagation is an attribution override, not an authentication hop.**
 The signed-header path verifies an HMAC over `user_id:email` and nothing else — no
@@ -95,11 +98,14 @@ and whether the keystore is degraded. It does not check backends, audit, or
 configuration, so it must not be used to decide whether an instance is safe to
 route writes to.
 
-**The docs corpus is bounded by an assumption.** Full clone with history, whole-
-corpus listing and unbounded document bodies are all fine for the small reviewed
-corpus this is designed for, and none of them is enforced. Monitor snapshot age,
-refresh duration, clone disk and document count; a corpus that outgrows "small"
-will show up as refresh latency and memory before request rate becomes the limit.
+**The docs corpus is sized for reviewed prose.** A refresh reads documents from
+the git tree (never through the checkout, so a committed symlink is not followed)
+and refuses the corpus outright — every docs call is a 503 naming the limit until
+the repository is brought back under it — when it exceeds 5,000 markdown
+documents, 2 MiB for one document, or 64 MiB in total. Below those
+caps nothing else is bounded: the clone keeps full history and the listing is
+whole-corpus. Monitor snapshot age, refresh duration and clone disk; a corpus that
+outgrows "small" shows up as refresh latency and memory before request rate does.
 
 **Read access to externally governed repositories.** The gateway serves the docs
 corpus; it does not create, review, validate or maintain it. Declared lifecycle

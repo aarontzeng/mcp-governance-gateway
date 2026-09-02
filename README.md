@@ -11,9 +11,12 @@ Agents get a small, uniform set of MCP tools. The gateway makes those tools
   tenant is never a tool argument, so an agent cannot read or write another
   team's memory or issues — the boundary is enforced by the gateway, not
   trusted from the client.
-- **Confirmation-gated writes.** Mutating tools use a two-step prepare/commit
-  flow. The first call returns a single-use, short-lived confirmation id bound
-  to the exact arguments; nothing is written until a second call confirms it.
+- **Confirmation-gated writes.** Tools that mutate an external system of record
+  (issue create, note, status change) use a two-step prepare/commit flow. The
+  first call returns a single-use, short-lived confirmation id bound to the
+  exact arguments; nothing is written until a second call confirms it. Memory
+  writes are not confirmed — they stay inside the caller's own project and are
+  secret-scanned and rate-limited per user and per project instead.
 - **Per-user attribution and an audit trail.** Every call is logged with the
   acting identity; writes to a backend are stamped with who asked, so a shared
   service credential never erases individual accountability.
@@ -96,14 +99,6 @@ All configuration is environment-driven; [`.env.example`](.env.example) lists
 every variable with a comment. Nothing is enabled implicitly — a backend is
 inert unless its variables are set.
 
-## Ownership boundaries (optional)
-
-`scripts/check_owners.py` enforces module ownership at commit time using the
-[find-owners](https://gerrit.googlesource.com/plugins/find-owners/) format: a
-change touching a path you do not own is rejected unless it carries a
-`Cross-Owner:` trailer and the owner approves at review. It is standalone and
-does not require the gateway. See [`scripts/README.md`](scripts/README.md).
-
 ## Documentation
 
 | Document | What it covers |
@@ -119,6 +114,12 @@ Start with [ADR-0001](docs/decisions/ADR-0001-mcp-governance-gateway.md) for wha
 the gateway is, then [ADR-0002](docs/decisions/ADR-0002-token-boundaries.md) and
 [ADR-0003](docs/decisions/ADR-0003-confirmation-and-dangerous-actions.md) for the
 two properties everything else preserves.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules and
+[SECURITY.md](SECURITY.md) for how to report a vulnerability privately.
+Releases are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

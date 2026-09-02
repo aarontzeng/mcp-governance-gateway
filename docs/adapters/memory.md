@@ -35,7 +35,7 @@ knowledge **graph** and **crystals** (action digests) are derived server-side by
 the backend LLM — the adapter exposes **no** tool to write them, so agents never
 mutate them; they are admin-viewer-only overviews. The LLM-driven backend features
 (graph/crystals/consolidation) require a clean-JSON, non-reasoning model
-(`gemini-2.5-flash`); a `<thought>`-emitting model yields empty extractions.
+(a Flash-class model works); a `<thought>`-emitting reasoning model yields empty extractions.
 
 ## Metadata Contract
 
@@ -120,4 +120,4 @@ Deployment requirements:
 ## Graph and LLM Features
 
 The MVP should not depend on graph extraction or external LLM enrichment. Basic
-embedding-backed search is sufficient for the first rollout.
+embedding-backed search is sufficient for an initial deployment.

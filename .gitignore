@@ -4,6 +4,11 @@
 *.pem
 *.key
 *.p12
+# Runtime state: token stores and encrypted credential stores never belong in git.
+tokens.json
+user-tokens.json
+*-keys.json
+*.master
 *.log
 node_modules/
 dist/

@@ -8,7 +8,7 @@ ciphertext cannot be relabelled as another backend's.
 
 ## Date
 
-2026-07-08 (recorded retrospectively 2026-07-10 from the session/vault record)
+2026-07-08 (written up 2026-07-10)
 
 ## Context
 

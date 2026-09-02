@@ -29,7 +29,7 @@ Repository = "https://github.com/aarontzeng/mcp-governance-gateway"
 Issues = "https://github.com/aarontzeng/mcp-governance-gateway/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "build", "twine"]
 
 [project.scripts]
 mcp-governance-gateway = "mcp_governance_gateway.server:main"

@@ -7,7 +7,7 @@ reflects dependency rather than a schedule.
 ## Docs corpus: write path and review workflow
 
 Today the docs corpus is **read-only** (`docs.search` / `get` / `list`). The
-write half exists and is in production use elsewhere: `docs.create` /
+write half exists in a private deployment and has not been ported here yet: `docs.create` /
 `docs.update` push real review changes under the caller's own SSH key, agents
 pre-review with a vote clamped to ±1 server-side, and publishing is human-only.
 

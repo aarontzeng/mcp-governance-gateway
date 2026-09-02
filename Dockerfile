@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# The docs corpus (docs.search/get/list) shallow-clones each project's docs repo
+# The docs corpus (docs.search/get/list) clones each project's docs repo
 # and pulls it on a throttled loop. git for the clone; openssh-client because
 # Gerrit remotes are ssh:// (git's https helper is already in git-core).
 RUN apt-get update -qq \
