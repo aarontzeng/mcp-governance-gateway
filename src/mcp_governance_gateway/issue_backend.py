@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import time
@@ -653,7 +654,9 @@ class RedmineHttpBackend(IssueBackend):
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except error.HTTPError as exc:
             raise IssueBackendError(f"issue tracker HTTP {exc.code}", status=exc.code) from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # A garbled or truncated reply is an HTTPException, not an OSError;
+            # either way the backend is unusable, not the caller.
             raise IssueBackendError("issue tracker unavailable") from exc
 
         if len(raw) > _MAX_RESPONSE_BYTES:

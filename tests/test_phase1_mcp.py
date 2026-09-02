@@ -850,6 +850,48 @@ class HttpMemoryBackendTests(unittest.TestCase):
         self.assertEqual(page["offset"], 1)
 
 
+class BackendFramingErrorTests(unittest.TestCase):
+    """A backend reply that breaks HTTP framing -- a body that ends inside a
+    chunk, a garbled status line -- raises http.client.HTTPException, which is
+    not an OSError. Each HTTP backend must still report it as its own error:
+    anything else escapes the tool dispatcher, which then neither answers nor
+    audits the call. urlopen is faked; nothing here touches the network."""
+
+    def _ctx(self) -> RequestContext:
+        return RequestContext(actor="u", project="p", client="t", request_id="r", issue_project="97")
+
+    def _patched(self, module: str):
+        import http.client
+        return mock.patch(f"mcp_governance_gateway.{module}.request.urlopen",
+                          side_effect=http.client.IncompleteRead(b""))
+
+    def test_a_truncated_memory_reply_is_memory_backend_unavailable(self) -> None:
+        from mcp_governance_gateway.memory_backend import MemoryBackendError
+        backend = HttpMemoryBackend(
+            base_url="http://memory.internal:3111", backend_token=None,
+            search_path="/agentmemory/search", save_path="/agentmemory/remember",
+        )
+        with self._patched("memory_backend"):
+            with self.assertRaises(MemoryBackendError) as cm:
+                backend.search("q", 5, self._ctx())
+        self.assertEqual(str(cm.exception), "memory backend unavailable")
+
+    def test_a_truncated_redmine_reply_is_issue_tracker_unavailable(self) -> None:
+        backend = RedmineHttpBackend(base_url="http://tracker.example", api_key="k")
+        with self._patched("issue_backend"):
+            with self.assertRaises(IssueBackendError) as cm:
+                backend.get("1", self._ctx())
+        self.assertEqual(str(cm.exception), "issue tracker unavailable")
+
+    def test_a_truncated_gitlab_reply_is_issue_tracker_unavailable(self) -> None:
+        from mcp_governance_gateway.gitlab_backend import GitLabHttpBackend
+        backend = GitLabHttpBackend("https://gitlab.example", "TOKEN")
+        with self._patched("gitlab_backend"):
+            with self.assertRaises(IssueBackendError) as cm:
+                backend.get("1", self._ctx())
+        self.assertEqual(str(cm.exception), "issue tracker unavailable")
+
+
 class MemoryListingShapeTests(unittest.TestCase):
     """What the listing endpoints keep when the limit bites."""
 

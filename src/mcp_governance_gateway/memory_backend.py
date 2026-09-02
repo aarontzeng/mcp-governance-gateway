@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import http.client
 import json
 from pathlib import Path
 from typing import Any
@@ -241,7 +242,9 @@ class HttpMemoryBackend(MemoryBackend):
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except error.HTTPError as exc:
             raise MemoryBackendError(f"memory backend HTTP {exc.code}", status=exc.code) from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # A garbled or truncated reply is an HTTPException, not an OSError;
+            # either way the backend is unusable, not the caller.
             raise MemoryBackendError("memory backend unavailable") from exc
         return _decode(raw)
 
@@ -371,7 +374,9 @@ class HttpMemoryBackend(MemoryBackend):
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except error.HTTPError as exc:
             raise MemoryBackendError(f"memory backend HTTP {exc.code}", status=exc.code) from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # A garbled or truncated reply is an HTTPException, not an OSError;
+            # either way the backend is unusable, not the caller.
             raise MemoryBackendError("memory backend unavailable") from exc
         return _decode(raw)
 
