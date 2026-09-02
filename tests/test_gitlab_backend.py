@@ -158,6 +158,16 @@ class PersonalTokenTests(unittest.TestCase):
         verify_idx = [i for i, (m, p, _, _) in enumerate(fake.calls) if p == "/projects/42/issues/7"][0]
         self.assertEqual(fake.tokens[verify_idx], "PAT-OF-USER")
 
+    def test_personal_pat_also_gates_update_status_existence_check(self):
+        # Same property as add_note above, on the other check-then-write tool:
+        # the verify GET, the state PUT and the journal note all run on the PAT.
+        fake = FakeGitLab()
+        fake._key_resolver = lambda actor: (KeyState.OK, "PAT-OF-USER")
+        fake.update_status("7", "closed", None, _ctx())
+        issue_calls = [(m, fake.tokens[i]) for i, (m, p, _, _) in enumerate(fake.calls)
+                       if p.startswith("/projects/42/issues/7")]
+        self.assertEqual(issue_calls, [("GET", "PAT-OF-USER"), ("PUT", "PAT-OF-USER"), ("POST", "PAT-OF-USER")])
+
     def test_enforced_without_key_fails_428(self):
         fake = FakeGitLab()
         fake._key_resolver = lambda actor: (KeyState.MISSING, None)

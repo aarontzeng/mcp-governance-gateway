@@ -71,19 +71,19 @@ wired into the gateway as the `issues.*` tools. Status: built and unit-tested;
 read paths validated read-only against a live Redmine. Deployment is gated on the
 gateway host being able to reach Redmine.
 
-- **Tenant boundary.** Each token carries a `redmine_project` (Redmine project id
+- **Tenant boundary.** Each token carries an `issue_project` claim (Redmine project id
   or identifier). The gateway resolves it to a numeric project id and forces every
   operation to it: `issues.search` is constrained to that project, and
   `issues.get` / `issues.add_note` / `issues.update_status` first verify the target
   issue belongs to it (an id from another project returns 404). The client never
   supplies a project. Policy denies all `issues.*` for a token without a
-  `redmine_project`.
+  `issue_project` (the legacy `redmine_project` spelling is still read, ADR-0012).
 - **Authorization (read vs write).** Read tools (`issues.get` / `issues.search` /
   `issues.mine` / `issues.categories`)
-  need only a `redmine_project`. Write tools additionally require the token to
+  need only an `issue_project`. Write tools additionally require the token to
   carry the `issue_writer` role; without it writes are denied (default-deny —
   confirmation is not authorization). `tools/list` advertises only the tools a
-  principal may call (backend configured, `redmine_project` present, and the write
+  principal may call (backend configured, `issue_project` present, and the write
   role for writes), though `handle_tool_call` re-checks policy regardless.
 - **Writes are confirmation-gated** (ADR-0003). `issues.create`, `issues.add_note`,
   and `issues.update_status` are non-destructive writes: the first call returns a
