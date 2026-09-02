@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mcp_governance_gateway.audit import ListAuditSink
 from mcp_governance_gateway.auth import AuthError, BearerTokenAuthenticator, IdentityVerifier, Principal
+from mcp_governance_gateway.ci_backend import CiBackendError
 from mcp_governance_gateway.config import Settings
 from mcp_governance_gateway.limits import InMemoryMemoryWriteLimiter, MemoryLimitConfig
 from mcp_governance_gateway.confirm import ConfirmationStore
@@ -927,7 +928,8 @@ class CiArtifactRouteTests(unittest.TestCase):
 
     def _server(self, project="proj-a", artifact_path="out/image.bin",
                 max_bytes=None, max_concurrent=None, declare_length=True, block=None,
-                declared_length=None, drop_after=None, drop_error=None, open_error=None):
+                declared_length=None, drop_after=None, drop_error=None, open_error=None,
+                transfer_encoding=None):
         import threading
         import time
 
@@ -972,6 +974,10 @@ class CiArtifactRouteTests(unittest.TestCase):
             headers = ({"Content-Type": "application/octet-stream",
                         "Content-Length": str(declared_length if declared_length is not None else len(payload))}
                        if declare_length else {"Content-Type": "application/octet-stream"})
+            if transfer_encoding is not None:
+                # An upstream that chunks its body: http.client de-chunks it and
+                # ignores any Content-Length, but leaves both headers readable.
+                headers = dict(headers, **{"Transfer-Encoding": transfer_encoding})
 
             def __init__(self):
                 self._left = payload
@@ -1083,7 +1089,7 @@ class CiArtifactRouteTests(unittest.TestCase):
                 self.assertEqual(response.status, 404)
 
     def test_a_refused_job_or_path_is_not_written_into_the_audit_log(self) -> None:
-        # Until open_artifact has validated them, job and path are whatever the
+        # Until locate_artifact has validated them, job and path are whatever the
         # caller typed; the audit log records the refusal, not the typed string.
         port = self._server()
         response, _ = self._get(port, "job=swarm-build&path=out/" + "glpat-" + "x1" * 12)
@@ -1157,6 +1163,28 @@ class CiArtifactRouteTests(unittest.TestCase):
         conn.close()
         self.assertEqual(self.audit.events[-1].outcome, "truncated")
 
+    def test_an_upstream_transfer_encoding_overrides_its_content_length(self) -> None:
+        # Review, 2026-09-03: an upstream sending both Transfer-Encoding: chunked
+        # and a Content-Length is de-chunked by http.client, which ignores the
+        # length -- but the header is still readable, and forwarding it promised
+        # the client a length the body did not have (here: half of it, so the
+        # client would have kept a prefix as the whole file).
+        import http.client
+
+        port = self._server(declared_length=len(self.PAYLOAD) // 2, transfer_encoding="chunked")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/ci/artifact?job=swarm-build&build=291&path=out/image.bin",
+                     headers={"Authorization": "Bearer tok-a"})
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(response.getheader("Content-Length"))
+        self.assertEqual(response.getheader("Transfer-Encoding"), "chunked")
+        self.assertEqual(response.read(), self.PAYLOAD)
+        conn.close()
+        event = self.audit.events[-1]
+        self.assertEqual(event.outcome, "ok")
+        self.assertEqual(event.bytes_sent, len(self.PAYLOAD))
+
     def test_an_upstream_that_drops_mid_stream_leaves_the_body_incomplete(self) -> None:
         # No length and the upstream dies after the first chunk: no terminator is
         # written and the connection is closed, so the client learns at once that
@@ -1201,7 +1229,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         # The refusal test above keeps typed strings out of the audit log; once the
         # job and path have passed the allowlist and the listing they are the
         # gateway's own words, and a failed fetch has to be traceable to them.
-        port = self._server(open_error=IssueBackendError("CI unavailable"))  # CiBackendError is this class
+        port = self._server(open_error=CiBackendError("CI unavailable"))
         response, _ = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
         self.assertEqual(response.status, 502)
         event = self.audit.events[-1]

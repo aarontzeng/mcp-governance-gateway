@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from typing import Any
 
@@ -111,8 +112,10 @@ class ArtifactListingTests(unittest.TestCase):
 
 
 class ArtifactDownloadTests(unittest.TestCase):
-    """open_artifact() is the only path to the bytes, so its two gates matter: the
-    tenant allowlist, and that the path is one Jenkins itself listed."""
+    """locate_artifact() is the gate to the bytes (open_artifact() is it plus the
+    open), so its two checks matter: the tenant allowlist, and that the path is
+    one Jenkins itself listed. open_located() trusts its argument: nothing in the
+    package calls it with a path locate_artifact() did not return."""
 
     def _backend(self):
         import json as _json
@@ -185,6 +188,35 @@ class ArtifactDownloadTests(unittest.TestCase):
             backend.open_artifact("swarm-build", 291, "out/image.bin", _ctx("proj-b"))
         self.assertEqual(cm.exception.status, 404)
         self.assertEqual(self.opened, [])
+
+    def test_a_garbled_upstream_reply_is_reported_as_ci_unavailable(self):
+        # A bad status line or an over-long header is an http.client.HTTPException,
+        # not an OSError: it must still come back as a CiBackendError, or it would
+        # escape the artifact route's error handling and never be audited.
+        import http.client
+        from unittest import mock
+        backend = JenkinsHttpBackend(
+            "https://jenkins.example", "svc", "TOKEN", {"proj-a": ["swarm-build"]},
+        )
+        backend._fetch = lambda path: json.dumps(ARTIFACT_LISTING).encode()  # type: ignore[method-assign]
+        with mock.patch("mcp_governance_gateway.ci_backend.request.urlopen",
+                        side_effect=http.client.BadStatusLine("garbage")):
+            with self.assertRaises(CiBackendError) as cm:
+                backend.open_artifact("swarm-build", 291, "out/image.bin", _ctx())
+        self.assertEqual(str(cm.exception), "CI unavailable")
+        self.assertIsNone(cm.exception.status)
+
+    def test_a_garbled_upstream_reply_to_a_status_read_is_ci_unavailable_too(self):
+        import http.client
+        from unittest import mock
+        backend = JenkinsHttpBackend(
+            "https://jenkins.example", "svc", "TOKEN", {"proj-a": ["swarm-build"]},
+        )
+        with mock.patch("mcp_governance_gateway.ci_backend.request.urlopen",
+                        side_effect=http.client.BadStatusLine("garbage")):
+            with self.assertRaises(CiBackendError) as cm:
+                backend.status(_ctx())
+        self.assertEqual(str(cm.exception), "CI unavailable")
 
 
 class StatusTests(unittest.TestCase):

@@ -73,10 +73,9 @@ calls is updated on its new project.
 neither Redmine nor GitLab offers a conditional write. What an issue moved to
 another project between the two calls receives depends on the backend: Redmine
 writes by global id, so the write lands on the issue in its new project; GitLab
-writes through the checked project's own path, and a move there leaves a closed
-copy behind in the original project, which is what receives the write. The
-window is one round-trip and the write still lands under the caller's own
-credential when one is enrolled.
+writes through the checked project's own path, so the write never follows the
+issue into a project the check did not see. The window is one round-trip and
+the write still lands under the caller's own credential when one is enrolled.
 
 **One 403 names a project the shared key can see.** When a caller's personal
 Redmine key is refused with 403 for an issue their own account cannot read, the

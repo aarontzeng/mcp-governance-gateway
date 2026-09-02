@@ -122,7 +122,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 client="ci-artifact", request_id=request_id,
             )
 
-            # Recorded only once open_artifact has checked them against the
+            # Recorded only once locate_artifact has checked them against the
             # allowlist and the build's own listing: until then job and path are
             # whatever the caller typed, and the audit log is append-only.
             resource_id: str | None = None
@@ -159,10 +159,17 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     self._send_json(int(exc.status or 502), {"error": str(exc)})
                     return
                 cap = self.server.artifact_max_bytes
-                try:
-                    declared = int(upstream.headers.get("Content-Length") or 0)
-                except ValueError:
+                if upstream.headers.get("Transfer-Encoding"):
+                    # The upstream's own framing wins (RFC 9112 section 6.3):
+                    # http.client de-chunks the body and ignores the
+                    # Content-Length, but the header is still there to read, and
+                    # forwarding it would promise a length the body need not have.
                     declared = 0
+                else:
+                    try:
+                        declared = int(upstream.headers.get("Content-Length") or 0)
+                    except ValueError:
+                        declared = 0
                 if declared < 0:
                     # A negative length is no length (http.client reads it the same
                     # way). Forwarded, it would make the body close-delimited again.

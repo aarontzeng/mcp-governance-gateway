@@ -16,6 +16,7 @@ the whole log.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 from typing import Any
 from urllib import error, parse, request
@@ -212,7 +213,9 @@ class JenkinsHttpBackend:
             return request.urlopen(req, timeout=self._timeout_sec)
         except error.HTTPError as exc:
             raise CiBackendError(f"CI HTTP {exc.code}", status=exc.code) from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # A garbled status line or an over-long header is an HTTPException,
+            # not an OSError; either way the CI is unusable, not the caller.
             raise CiBackendError("CI unavailable") from exc
 
     def _project_jobs(self, context: RequestContext) -> list[str]:
@@ -259,7 +262,9 @@ class JenkinsHttpBackend:
                 return response.read(_MAX_LOG_FETCH_BYTES)
         except error.HTTPError as exc:
             raise CiBackendError(f"CI HTTP {exc.code}", status=exc.code) from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # A garbled status line or an over-long header is an HTTPException,
+            # not an OSError; either way the CI is unusable, not the caller.
             raise CiBackendError("CI unavailable") from exc
 
     def _headers(self) -> dict[str, str]:
