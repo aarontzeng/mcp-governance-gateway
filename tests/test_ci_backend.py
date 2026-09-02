@@ -218,6 +218,50 @@ class ArtifactDownloadTests(unittest.TestCase):
                 backend.status(_ctx())
         self.assertEqual(str(cm.exception), "CI unavailable")
 
+    def test_a_status_reply_that_ends_mid_body_is_ci_unavailable(self):
+        # The two tests above fail urlopen itself; this one fails the read()
+        # inside the `with` block, where a truncated body actually surfaces.
+        import http.client
+        from unittest import mock
+
+        class _Truncated:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n=-1):
+                raise http.client.IncompleteRead(b"")
+
+        backend = JenkinsHttpBackend(
+            "https://jenkins.example", "svc", "TOKEN", {"proj-a": ["swarm-build"]},
+        )
+        with mock.patch("mcp_governance_gateway.ci_backend.request.urlopen", return_value=_Truncated()):
+            with self.assertRaises(CiBackendError) as cm:
+                backend.status(_ctx())
+        self.assertEqual(str(cm.exception), "CI unavailable")
+
+    def test_every_jenkins_request_asks_for_an_identity_coded_body(self):
+        # The artifact route serves the bytes as they arrive and refuses a coded
+        # body; asking for identity is what makes that refusal the exception.
+        from unittest import mock
+        sent = []
+
+        def capture(req, timeout):
+            sent.append(req)
+            raise OSError("not connected")
+
+        backend = JenkinsHttpBackend(
+            "https://jenkins.example", "svc", "TOKEN", {"proj-a": ["swarm-build"]},
+        )
+        with mock.patch("mcp_governance_gateway.ci_backend.request.urlopen", side_effect=capture):
+            with self.assertRaises(CiBackendError):
+                backend.status(_ctx())
+            with self.assertRaises(CiBackendError):
+                backend.open_located("/job/swarm-build/291/artifact/out/image.bin")
+        self.assertEqual([r.get_header("Accept-encoding") for r in sent], ["identity", "identity"])
+
 
 class StatusTests(unittest.TestCase):
     def test_status_lists_allowlisted_jobs(self):

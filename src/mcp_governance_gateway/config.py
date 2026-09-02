@@ -146,23 +146,26 @@ def _int_env(name: str, default: int, *, minimum: int | None = None) -> int:
 
 
 def _url_env(name: str, default: str | None = None) -> str | None:
-    # A base URL urlopen cannot use ("ci.internal:8080", no scheme) fails at
-    # request time as a ValueError, which the tool dispatcher reports as the
-    # caller's mistake. Refusing it at startup names the operator's instead.
-    value = os.environ.get(name) or default
-    if value is None:
-        return None
+    # A base URL urlopen cannot use ("ci.internal:8080" without a scheme, or a
+    # path http.client cannot encode) would fail on every request; refusing it
+    # at startup names the operator's mistake once.
+    value = os.environ.get(name, default)
+    if not value and default is None:
+        return None     # an optional backend, unset or set empty
     parts = urlsplit(value)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
-        raise ValueError(f"{name} must be an http:// or https:// URL, got {value!r}")
+    if parts.scheme not in ("http", "https") or not parts.netloc or not value.isascii():
+        raise ValueError(f"{name} must be an ASCII http:// or https:// URL, got {value!r}")
     return value
 
 
+_MAX_TIMEOUT_SEC = 3600.0
+
+
 def _timeout_env(name: str, default: float = 10.0) -> float:
-    # Same fate for a timeout the socket layer rejects (nan, inf, negative):
-    # a ValueError or OverflowError on every request instead of one at startup.
+    # Same fate for a timeout the socket layer rejects (nan, inf, negative, or so
+    # large its clock overflows): an error on every request instead of one here.
     value = os.environ.get(name)
     parsed = default if value is None else float(value)
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise ValueError(f"{name} must be a finite number of seconds greater than 0")
+    if not math.isfinite(parsed) or not 0 < parsed <= _MAX_TIMEOUT_SEC:
+        raise ValueError(f"{name} must be a number of seconds greater than 0 and at most {_MAX_TIMEOUT_SEC:g}")
     return parsed

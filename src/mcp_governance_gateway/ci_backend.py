@@ -213,9 +213,10 @@ class JenkinsHttpBackend:
             return request.urlopen(req, timeout=self._timeout_sec)
         except error.HTTPError as exc:
             raise CiBackendError(f"CI HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException) as exc:
-            # A garbled status line or an over-long header is an HTTPException,
-            # not an OSError; either way the CI is unusable, not the caller.
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # A garbled status line or an over-long header is an HTTPException, not
+            # an OSError, and a credential or redirect the request cannot be encoded
+            # with is a ValueError; either way the CI is unusable, not the caller.
             raise CiBackendError("CI unavailable") from exc
 
     def _project_jobs(self, context: RequestContext) -> list[str]:
@@ -262,13 +263,16 @@ class JenkinsHttpBackend:
                 return response.read(_MAX_LOG_FETCH_BYTES)
         except error.HTTPError as exc:
             raise CiBackendError(f"CI HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException) as exc:
-            # A garbled status line or an over-long header is an HTTPException,
-            # not an OSError; either way the CI is unusable, not the caller.
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # A garbled status line or an over-long header is an HTTPException, not
+            # an OSError, and a credential or redirect the request cannot be encoded
+            # with is a ValueError; either way the CI is unusable, not the caller.
             raise CiBackendError("CI unavailable") from exc
 
     def _headers(self) -> dict[str, str]:
-        h = {"Accept": "application/json"}
+        # identity: an artifact is streamed as the bytes the build wrote, and the
+        # download route refuses a body Jenkins (or a proxy) coded anyway.
+        h = {"Accept": "application/json", "Accept-Encoding": "identity"}
         if self._auth:
             h["Authorization"] = self._auth
         return h

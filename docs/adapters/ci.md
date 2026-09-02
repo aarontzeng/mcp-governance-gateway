@@ -70,6 +70,14 @@ project, `job:path`, the outcome — `ok`, `rejected`, `truncated`, `interrupted
 `backend_error` — and the number of bytes delivered. Without it the byte movement
 would be the one operation the gateway performed and did not record.
 
+The bytes served are the bytes the build wrote: the gateway asks Jenkins for an
+identity-coded body and answers 502 (`backend_error`) if the upstream codes it
+anyway, whether a transfer coding `http.client` does not decode or any
+`Content-Encoding` — a gzip stream saved under the artifact's own name would be
+silent corruption. Redirects are followed only within the origin the request
+went to; one that leaves it (another host, `ftp://`) is a backend failure, so a
+Jenkins credential never travels with it.
+
 Honest cost that remains: the gateway is a data path, so a 200 MB pull is 200 MB
 in and out of the host. Range/resume is not passed through, so an interrupted
 transfer restarts from the beginning.

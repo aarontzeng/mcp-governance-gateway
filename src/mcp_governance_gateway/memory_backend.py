@@ -242,9 +242,10 @@ class HttpMemoryBackend(MemoryBackend):
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except error.HTTPError as exc:
             raise MemoryBackendError(f"memory backend HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException) as exc:
-            # A garbled or truncated reply is an HTTPException, not an OSError;
-            # either way the backend is unusable, not the caller.
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # A garbled or truncated reply is an HTTPException, not an OSError, and
+            # a credential or redirect the request cannot be encoded with is a
+            # ValueError; either way the backend is unusable, not the caller.
             raise MemoryBackendError("memory backend unavailable") from exc
         return _decode(raw)
 
@@ -374,9 +375,10 @@ class HttpMemoryBackend(MemoryBackend):
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except error.HTTPError as exc:
             raise MemoryBackendError(f"memory backend HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException) as exc:
-            # A garbled or truncated reply is an HTTPException, not an OSError;
-            # either way the backend is unusable, not the caller.
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # A garbled or truncated reply is an HTTPException, not an OSError, and
+            # a credential or redirect the request cannot be encoded with is a
+            # ValueError; either way the backend is unusable, not the caller.
             raise MemoryBackendError("memory backend unavailable") from exc
         return _decode(raw)
 

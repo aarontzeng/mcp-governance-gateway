@@ -11,7 +11,8 @@ import threading
 import time
 import uuid
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib import error, request
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 from .audit import AuditEvent, AuditSink, JsonLinesAuditSink
 from .auth import AuthError, BearerTokenAuthenticator, IdentityVerifier
@@ -35,6 +36,20 @@ def _safe_filename(name: str) -> str:
     whitelist collapses to `_`; an empty result becomes a placeholder, so the header
     is always well-formed."""
     return _FILENAME_SAFE.sub("_", name).strip("._") or "artifact"
+
+
+class SameOriginRedirects(request.HTTPRedirectHandler):
+    """urllib's default follows a redirect anywhere -- another host, or ftp://,
+    whose response is not an HTTPResponse -- and copies the Authorization header
+    along. Every request this process makes carries a backend credential, so a
+    redirect may only stay on the origin the request was sent to."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        origin = urlsplit(req.full_url)
+        target = urlsplit(newurl)
+        if (target.scheme.lower(), target.netloc.lower()) != (origin.scheme.lower(), origin.netloc.lower()):
+            raise error.URLError(f"redirect leaves the backend's origin: {code} to {target.scheme}://{target.netloc}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class GatewayHTTPServer(ThreadingHTTPServer):
@@ -159,6 +174,14 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     self._send_json(int(exc.status or 502), {"error": str(exc)})
                     return
                 cap = self.server.artifact_max_bytes
+                if upstream.headers.get("Content-Encoding", "identity").strip().lower() not in ("", "identity"):
+                    # The request asked for identity; a body coded anyway is not
+                    # the artifact, and the client would save it under its name.
+                    audit("backend_error", "upstream content coding is not one this gateway decodes")
+                    upstream.close()
+                    self._send_json(HTTPStatus.BAD_GATEWAY,
+                                    {"error": "CI sent the artifact under a content coding this gateway cannot decode"})
+                    return
                 if upstream.chunked:
                     # The upstream's own framing wins (RFC 9112 section 6.3):
                     # http.client de-chunked the body and ignores the
@@ -359,6 +382,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
 
 
 def build_server(settings: Settings) -> GatewayHTTPServer:
+    request.install_opener(request.build_opener(SameOriginRedirects))
     token_sources: list[tuple[str, bool]] = [(settings.token_file, True)]
     if settings.user_token_file:
         # optional, runtime-managed per-user token store (may be absent/empty); hot-reloaded

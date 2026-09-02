@@ -614,15 +614,48 @@ class SettingsTests(unittest.TestCase):
                         Settings.from_env()
                 self.assertIn(name, str(cm.exception))
 
+    def test_a_backend_url_http_client_cannot_encode_is_refused_at_startup(self) -> None:
+        # Round 7: a non-ASCII path passes the scheme check but fails inside
+        # urlopen on every request; same startup gate, same named variable.
+        with mock.patch.dict(
+            "os.environ", {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", "JENKINS_BASE_URL": "https://ci.internal/caf\u00e9/"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "JENKINS_BASE_URL"):
+                Settings.from_env()
+
+    def test_an_explicitly_empty_memory_url_is_refused_not_defaulted(self) -> None:
+        # Round 7: `MEMORY_BASE_URL=` used to be kept as "" (and fail on every
+        # request); silently substituting the localhost default would instead
+        # send memory payloads and the backend token wherever listens there.
+        with mock.patch.dict(
+            "os.environ", {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", "MEMORY_BASE_URL": ""}, clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "MEMORY_BASE_URL"):
+                Settings.from_env()
+        # An empty OPTIONAL backend URL still means "not configured".
+        with mock.patch.dict(
+            "os.environ", {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", "REDMINE_BASE_URL": ""}, clear=True,
+        ):
+            self.assertIsNone(Settings.from_env().redmine_base_url)
+
     def test_a_timeout_the_socket_layer_would_reject_is_refused_at_startup(self) -> None:
-        for value in ("0", "-1", "inf", "nan"):
+        # 1e300 is finite and positive but overflows the socket clock. The
+        # message must name the variable: with the predicate inverted the
+        # DEFAULT memory timeout would raise first and a bare assertRaises
+        # would still pass (round 7).
+        for value in ("0", "-1", "inf", "nan", "1e300"):
             with self.subTest(value=value):
                 with mock.patch.dict(
                     "os.environ", {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", "JENKINS_TIMEOUT_SEC": value},
                     clear=True,
                 ):
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(ValueError, "JENKINS_TIMEOUT_SEC"):
                         Settings.from_env()
+        with mock.patch.dict(
+            "os.environ", {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", "JENKINS_TIMEOUT_SEC": "3600"}, clear=True,
+        ):
+            self.assertEqual(Settings.from_env().jenkins_timeout_sec, 3600.0)
 
 
 class HttpMemoryBackendTests(unittest.TestCase):
@@ -953,6 +986,99 @@ class BackendFramingErrorTests(unittest.TestCase):
         self.assertEqual(audit.events[-1].outcome, "backend_error")
 
 
+class BackendRequestEncodingErrorTests(unittest.TestCase):
+    """A request http.client cannot put on the wire -- a credential outside
+    latin-1, a request target outside ASCII -- raises ValueError (its Unicode
+    subclasses) inside urlopen, before any socket is opened. Round 7: with the
+    backend clauses catching only OSError and HTTPException, the dispatcher
+    reported such a call as the CALLER's invalid arguments. Nothing is faked:
+    the base URLs point at a closed port that is never reached, because the
+    encoding fails first; the mutation check is what proves that order."""
+
+    def _ctx(self) -> RequestContext:
+        return RequestContext(actor="u", project="p", client="t", request_id="r", issue_project="97")
+
+    def test_a_credential_or_path_the_request_cannot_carry_is_the_backends_error(self) -> None:
+        from mcp_governance_gateway.ci_backend import JenkinsHttpBackend
+        from mcp_governance_gateway.gitlab_backend import GitLabHttpBackend
+        from mcp_governance_gateway.memory_backend import MemoryBackendError
+        bad = "k\u0100y"       # outside latin-1: no header value can carry it
+        cases = (
+            ("memory-post", MemoryBackendError, "memory backend unavailable",
+             lambda: HttpMemoryBackend(base_url="http://127.0.0.1:9", backend_token=bad,
+                                       search_path="/s", save_path="/r").search("q", 5, self._ctx())),
+            ("memory-get", MemoryBackendError, "memory backend unavailable",
+             lambda: HttpMemoryBackend(base_url="http://127.0.0.1:9", backend_token=bad,
+                                       search_path="/s", save_path="/r").lesson_list(5, self._ctx())),
+            ("redmine", IssueBackendError, "issue tracker unavailable",
+             lambda: RedmineHttpBackend(base_url="http://127.0.0.1:9", api_key=bad).get("1", self._ctx())),
+            ("gitlab", IssueBackendError, "issue tracker unavailable",
+             lambda: GitLabHttpBackend("http://127.0.0.1:9", bad).get("1", self._ctx())),
+            # Jenkins credentials are base64 (always ASCII); its request target
+            # is the exposure -- a base path the validated Settings would refuse.
+            ("ci-fetch", CiBackendError, "CI unavailable",
+             lambda: JenkinsHttpBackend("http://127.0.0.1:9/caf\u00e9", None, None,
+                                        {"p": ["job-a"]}).status(self._ctx())),
+            ("ci-open", CiBackendError, "CI unavailable",
+             lambda: JenkinsHttpBackend("http://127.0.0.1:9/caf\u00e9", None, None,
+                                        {"p": ["job-a"]}).open_located("/job/job-a/1/artifact/a")),
+        )
+        for name, exc_type, message, call in cases:
+            with self.subTest(backend=name):
+                with self.assertRaises(exc_type) as cm:
+                    call()
+                self.assertEqual(str(cm.exception), message)
+                self.assertIsInstance(cm.exception.__cause__, ValueError)
+
+
+class SameOriginRedirectTests(unittest.TestCase):
+    """build_server installs an opener whose redirects may not leave the
+    origin a request was sent to. Round 7: urllib's default follows a
+    redirect to another host -- or to ftp://, whose response is not an
+    HTTPResponse and has no `chunked` -- and copies Authorization along."""
+
+    def _handler(self):
+        from mcp_governance_gateway.server import SameOriginRedirects
+        return SameOriginRedirects()
+
+    def _redirect(self, newurl):
+        from urllib import request
+        req = request.Request("https://ci.internal:8443/job/x/lastBuild/api/json",
+                              headers={"Authorization": "Basic Zm9v"})
+        return self._handler().redirect_request(req, None, 302, "Found", {}, newurl)
+
+    def test_a_redirect_off_the_origin_is_refused_as_a_backend_failure(self) -> None:
+        from urllib import error
+        for newurl in ("ftp://ci.internal/x", "https://evil.example/x",
+                       "http://ci.internal:8443/x", "https://ci.internal:9443/x"):
+            with self.subTest(newurl=newurl):
+                with self.assertRaises(error.URLError):   # an OSError: every backend clause catches it
+                    self._redirect(newurl)
+
+    def test_a_redirect_within_the_origin_is_followed(self) -> None:
+        followed = self._redirect("https://CI.internal:8443/job/x/291/api/json")
+        assert followed is not None
+        self.assertEqual(followed.full_url, "https://CI.internal:8443/job/x/291/api/json")
+
+    def test_build_server_installs_the_handler_process_wide(self) -> None:
+        from urllib import request
+        from mcp_governance_gateway.server import SameOriginRedirects
+        tf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump({"tokens": [{"token": "t", "actor": "a", "project": "p", "roles": ["developer"]}]}, tf)
+        tf.close()
+        self.addCleanup(lambda: os.unlink(tf.name))
+        srv = build_server(Settings(
+            host="127.0.0.1", port=0, token_file=tf.name, allowed_origins=(),
+            memory_base_url="http://127.0.0.1:59999", memory_backend_token=None,
+            memory_search_path="/s", memory_save_path="/r", memory_timeout_sec=2,
+            memory_save_max_text_bytes=32768, memory_user_writes_per_minute=30,
+            memory_project_writes_per_day=5000, memory_user_reads_per_minute=120,
+        ))
+        self.addCleanup(srv.server_close)
+        installed = request._opener      # what urlopen will use from now on
+        self.assertTrue(any(isinstance(h, SameOriginRedirects) for h in installed.handlers))
+
+
 class MemoryListingShapeTests(unittest.TestCase):
     """What the listing endpoints keep when the limit bites."""
 
@@ -1032,7 +1158,7 @@ class CiArtifactRouteTests(unittest.TestCase):
     def _server(self, project="proj-a", artifact_path="out/image.bin",
                 max_bytes=None, max_concurrent=None, declare_length=True, block=None,
                 declared_length=None, drop_after=None, drop_error=None, open_error=None,
-                transfer_encoding=None):
+                transfer_encoding=None, content_encoding=None):
         import threading
         import time
 
@@ -1081,6 +1207,10 @@ class CiArtifactRouteTests(unittest.TestCase):
                 # An upstream that chunks its body: http.client de-chunks it and
                 # ignores any Content-Length, but leaves both headers readable.
                 headers = dict(headers, **{"Transfer-Encoding": transfer_encoding})
+            if content_encoding is not None:
+                # A body coded despite Accept-Encoding: identity; http.client
+                # decodes no content coding, so the bytes arrive as sent.
+                headers = dict(headers, **{"Content-Encoding": content_encoding})
             # http.client's own verdict: it decodes a bare "chunked" and nothing else.
             chunked = transfer_encoding is not None and transfer_encoding.lower() == "chunked"
 
@@ -1305,6 +1435,24 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertEqual(self.closed, [True])
         event = self.audit.events[-1]
         self.assertEqual(event.outcome, "backend_error")
+
+    def test_a_content_coding_http_client_did_not_decode_is_refused(self) -> None:
+        # Round 7: `Content-Encoding: gzip` with a plain Content-Length passed
+        # both framing checks and the gzip stream was served, 200 and audit
+        # "ok", under the artifact's own filename.
+        port = self._server(content_encoding="gzip")
+        response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        self.assertEqual(response.status, 502)
+        self.assertIn("content coding", json.loads(body)["error"])
+        self.assertEqual(self.reads, [])
+        self.assertEqual(self.closed, [True])
+        self.assertEqual(self.audit.events[-1].outcome, "backend_error")
+
+    def test_an_identity_content_coding_is_the_artifact_itself(self) -> None:
+        port = self._server(content_encoding="identity")
+        response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body, self.PAYLOAD)
 
     def test_an_upstream_that_drops_mid_stream_leaves_the_body_incomplete(self) -> None:
         # No length and the upstream dies after the first chunk: no terminator is
