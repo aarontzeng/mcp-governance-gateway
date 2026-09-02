@@ -81,7 +81,9 @@ gateway says so ("no access in this project") instead of the uniform "issue
 not found", because that message names the fixable cause. For an issue in
 another project that the shared key can read but the caller's cannot, this
 makes cross-project existence distinguishable — a subset of what the tracker
-already discloses to that same account directly.
+already discloses to that same account directly. GitLab has no such message:
+a personal PAT that cannot read the issue gets the tracker's own 404 as "issue
+not found", or its 403 passed through as `issue tracker HTTP 403`.
 
 **Secret scanning is best-effort.** Memory writes are rejected when they contain
 a credential-shaped unbroken blob (a PEM key, a well-known token prefix, a JWT, a

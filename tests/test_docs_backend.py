@@ -478,8 +478,9 @@ class ReposHotReloadTests(unittest.TestCase):
 
     def test_a_repos_key_that_is_not_a_plain_name_is_refused(self):
         # The key becomes the clone directory; a traversal or absolute key would
-        # point git's fetch and hard-reset outside the cache root.
-        for key in ("../other-repo", "/abs", "a/b", "..", "."):
+        # point git's fetch and hard-reset outside the cache root, and ".git" is
+        # the path every clone is probed for.
+        for key in ("../other-repo", "/abs", "a/b", "..", ".", ".git"):
             with self.subTest(key=key):
                 self.repos_file.write_text(json.dumps({key: {"url": "x", "branch": "main"}}))
                 with self.assertRaises(ValueError):

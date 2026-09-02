@@ -30,7 +30,7 @@ from typing import Any
 from .memory_backend import ActorLabels, RequestContext, _display_actor
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
-_PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9._-]+")
+_PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # no leading dot: not ".", "..", ".git"
 _CJK_RE = re.compile("[\\u3400-\\u9fff]")
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.M)
@@ -566,9 +566,10 @@ def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
     for project, spec in data.items():
         # The key names the clone directory under the cache root, so it must be a
         # single path component: a key like "../other" would make the gateway fetch
-        # into -- and hard-reset -- a checkout outside the cache.
-        if not _PROJECT_KEY_RE.fullmatch(str(project)) or str(project) in (".", ".."):
-            raise ValueError(f"docs repo key {project!r} must be a plain name (letters, digits, . _ -)")
+        # into -- and hard-reset -- a checkout outside the cache, and ".git" is the
+        # marker every clone is probed for.
+        if not _PROJECT_KEY_RE.fullmatch(str(project)):
+            raise ValueError(f"docs repo key {project!r} must be a plain name (letters, digits, . _ -; no leading dot)")
         if not isinstance(spec, dict) or not spec.get("url"):
             raise ValueError(f"docs repo entry for {project!r} needs a url")
         repos[str(project)] = {"url": str(spec["url"]), "branch": str(spec.get("branch", "master"))}

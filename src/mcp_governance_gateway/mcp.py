@@ -157,7 +157,7 @@ class GatewayApp:
         # An undeclared name is audited under a fixed label: the tool field is
         # the one caller-chosen string that reaches the audit log verbatim, and a
         # credential pasted there by mistake would sit in an append-only log
-        # forever. The caller still gets the name back in the error.
+        # forever. The error carries a fixed reason, never the name.
         audit_name = name if declared is not None else "unknown"
         decision = self._policy.decide(name, principal)
         if not decision.allowed:

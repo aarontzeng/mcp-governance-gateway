@@ -68,8 +68,9 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
         # MCP clients reuse one persistent connection (HTTP/1.1 keep-alive). Speaking
         # HTTP/1.0 makes the server close after each response, which the client sees
         # as ECONNRESET on its next request (e.g. notifications/initialized after
-        # initialize). Every response sets Content-Length, so keep-alive is safe;
-        # timeout closes idle connections so persistent clients don't leak threads.
+        # initialize). Every response is framed (Content-Length, or chunked for an
+        # artifact stream of unknown length), so keep-alive is safe; timeout
+        # closes idle connections so persistent clients don't leak threads.
         protocol_version = "HTTP/1.1"
         timeout = 65
 
@@ -174,15 +175,16 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     # in a browser on this origin would run with this origin.
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header("X-Content-Type-Options", "nosniff")
+                    chunked = not declared
                     if declared:
                         self.send_header("Content-Length", str(declared))
                     else:
-                        # No length and no chunked encoding: the only valid HTTP/1.1
-                        # framing left is closing the connection at the end of the
-                        # body, and the client must be told so it does not wait on
-                        # a keep-alive connection for bytes that will never come.
-                        self.send_header("Connection", "close")
-                        self.close_connection = True
+                        # No upstream length: chunked framing is self-delimiting, so
+                        # a body this gateway or the upstream cuts short is missing
+                        # its terminator and every HTTP/1.1 client reports it as
+                        # incomplete. Close-delimited framing would not: there the
+                        # client reads to EOF and keeps a truncated file as whole.
+                        self.send_header("Transfer-Encoding", "chunked")
                     # send_header does no CRLF validation of its own -- it formats
                     # "<k>: <v>\r\n" and appends -- so a filename carrying a line break
                     # would emit attacker-chosen response headers. Whitelist instead of
@@ -197,13 +199,19 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                         if sent + len(chunk) > cap:
                             # An absent or dishonest Content-Length cannot buy an
                             # unbounded transfer. The headers are already out, so the
-                            # only honest move is to stop: the client sees a short
-                            # read, and the audit says why.
+                            # only honest move is to stop without the terminator (or
+                            # short of the declared length): the client sees an
+                            # incomplete body, and the audit says why.
                             audit("truncated", f"exceeded cap {cap} mid-stream", sent)
                             self.close_connection = True
                             return
-                        self.wfile.write(chunk)
+                        if chunked:
+                            self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii") + chunk + b"\r\n")
+                        else:
+                            self.wfile.write(chunk)
                         sent += len(chunk)   # counted once delivered, not once read
+                    if chunked:
+                        self.wfile.write(b"0\r\n\r\n")
                     if declared and sent != declared:
                         # The upstream promised one length and delivered another. The
                         # client's framing is now wrong either way, so close rather
@@ -214,8 +222,10 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     audit("ok", "", sent)
                 except OSError:
                     # Client hung up or upstream dropped mid-stream: the headers are
-                    # already out, so there is nothing to report to the caller.
+                    # already out, so there is nothing to report to the caller, and
+                    # the connection is desynchronized either way.
                     audit("interrupted", "client or upstream dropped mid-stream", sent)
+                    self.close_connection = True
                 finally:
                     upstream.close()
             finally:

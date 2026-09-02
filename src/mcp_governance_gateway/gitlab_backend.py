@@ -10,8 +10,9 @@ another project is a 404 by construction — plus a defense-in-depth re-check of
 Deliberate v1 boundaries (documented, not accidental):
   * Per-user PATs via the generalized credential store: authorship writes route
     through the caller's own PAT when a key_resolver is wired (same Decision-5
-    semantics and enforced mode as Redmine); the shared token covers
-    non-authorship reads and the optional-mode fallback.
+    semantics and enforced mode as Redmine), including the existence check
+    that gates a write; the shared token covers plain reads and the
+    optional-mode fallback.
   * GitLab issues have two states (`opened`/`closed`); workflow lives in
     labels. `update_status` therefore accepts only OPEN/CLOSED (+aliases), and
     `done_ratio` is rejected rather than silently dropped.

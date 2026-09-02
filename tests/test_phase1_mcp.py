@@ -1107,28 +1107,47 @@ class CiArtifactRouteTests(unittest.TestCase):
 
     def test_a_dishonest_upstream_cannot_buy_an_unbounded_transfer(self) -> None:
         # No Content-Length to check up front: the cap has to hold on the stream.
+        # Review, 2026-09-03: the stop must be VISIBLE to the client. With a
+        # close-delimited body the client read to EOF and kept the prefix as a
+        # complete file; chunked framing leaves the terminator out, so the client
+        # reports an incomplete body instead.
+        import http.client
+
         port = self._server(max_bytes=100_000, declare_length=False)
-        try:
-            self._get(port, "job=swarm-build&build=291&path=out/image.bin")
-        except Exception:
-            pass  # a truncated response is the point; the client may see a short read
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/ci/artifact?job=swarm-build&build=291&path=out/image.bin",
+                     headers={"Authorization": "Bearer tok-a"})
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        with self.assertRaises(http.client.IncompleteRead):
+            response.read()
+        conn.close()
         event = self.audit.events[-1]
         self.assertEqual(event.outcome, "truncated")
         # bytes_sent counts what was written, so it can never exceed the cap the
         # stream was stopped at.
         self.assertLessEqual(event.bytes_sent, 100_000)
 
-    def test_an_upstream_without_a_length_is_close_delimited(self) -> None:
-        # HTTP/1.1 with neither Content-Length nor chunked encoding has exactly one
-        # valid framing left: the body ends when the connection closes. Without
-        # announcing that, a keep-alive client waits for bytes that never come.
+    def test_an_upstream_without_a_length_is_chunk_delimited(self) -> None:
+        # No upstream length: the body is chunked, so it is self-delimiting (a
+        # complete file is distinguishable from a cut-short one) and the
+        # connection stays usable for the next request.
+        import http.client
+
         port = self._server(declare_length=False)
-        response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
-        self.assertEqual(response.status, 200)
-        self.assertIsNone(response.getheader("Content-Length"))
-        self.assertEqual((response.getheader("Connection") or "").lower(), "close")
-        self.assertEqual(body, self.PAYLOAD)
-        self.assertEqual(self.audit.events[-1].outcome, "ok")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        for _ in range(2):  # twice on one connection: keep-alive survived the stream
+            conn.request("GET", "/ci/artifact?job=swarm-build&build=291&path=out/image.bin",
+                         headers={"Authorization": "Bearer tok-a"})
+            response = conn.getresponse()
+            body = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(response.getheader("Content-Length"))
+            self.assertEqual(response.getheader("Transfer-Encoding"), "chunked")
+            self.assertNotEqual((response.getheader("Connection") or "").lower(), "close")
+            self.assertEqual(body, self.PAYLOAD)
+            self.assertEqual(self.audit.events[-1].outcome, "ok")
+        conn.close()
 
     def test_an_upstream_that_delivers_less_than_it_declared_is_not_audited_ok(self) -> None:
         port = self._server(declared_length=len(self.PAYLOAD) + 1000)
