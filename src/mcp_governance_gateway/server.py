@@ -159,12 +159,21 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     self._send_json(int(exc.status or 502), {"error": str(exc)})
                     return
                 cap = self.server.artifact_max_bytes
-                if upstream.headers.get("Transfer-Encoding"):
+                if upstream.chunked:
                     # The upstream's own framing wins (RFC 9112 section 6.3):
-                    # http.client de-chunks the body and ignores the
+                    # http.client de-chunked the body and ignores the
                     # Content-Length, but the header is still there to read, and
                     # forwarding it would promise a length the body need not have.
                     declared = 0
+                elif upstream.headers.get("Transfer-Encoding"):
+                    # http.client decodes a bare "chunked" and nothing else, so
+                    # under any other value what it reads is still transfer-coded:
+                    # not the artifact, and not something to serve as one.
+                    audit("backend_error", "upstream transfer coding is not one this gateway decodes")
+                    upstream.close()
+                    self._send_json(HTTPStatus.BAD_GATEWAY,
+                                    {"error": "CI sent the artifact under a transfer coding this gateway cannot decode"})
+                    return
                 else:
                     try:
                         declared = int(upstream.headers.get("Content-Length") or 0)

@@ -600,6 +600,30 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Settings.from_env()
 
+    def test_a_backend_url_without_a_scheme_is_refused_at_startup(self) -> None:
+        # Review, 2026-09-03 (round 6): urlopen raises ValueError on such a URL at
+        # request time, which the dispatcher reports as the caller's invalid
+        # arguments -- so the operator's typo must be caught here instead.
+        for name in ("MEMORY_BASE_URL", "REDMINE_BASE_URL", "GITLAB_BASE_URL", "JENKINS_BASE_URL"):
+            with self.subTest(name=name):
+                with mock.patch.dict(
+                    "os.environ", {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", name: "ci.internal:8080"},
+                    clear=True,
+                ):
+                    with self.assertRaises(ValueError) as cm:
+                        Settings.from_env()
+                self.assertIn(name, str(cm.exception))
+
+    def test_a_timeout_the_socket_layer_would_reject_is_refused_at_startup(self) -> None:
+        for value in ("0", "-1", "inf", "nan"):
+            with self.subTest(value=value):
+                with mock.patch.dict(
+                    "os.environ", {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", "JENKINS_TIMEOUT_SEC": value},
+                    clear=True,
+                ):
+                    with self.assertRaises(ValueError):
+                        Settings.from_env()
+
 
 class HttpMemoryBackendTests(unittest.TestCase):
     def test_search_passes_project_and_strips_aggregate_fields(self) -> None:
@@ -855,26 +879,46 @@ class BackendFramingErrorTests(unittest.TestCase):
     chunk, a garbled status line -- raises http.client.HTTPException, which is
     not an OSError. Each HTTP backend must still report it as its own error:
     anything else escapes the tool dispatcher, which then neither answers nor
-    audits the call. urlopen is faked; nothing here touches the network."""
+    audits the call. urlopen is faked to hand back a response whose read()
+    fails, the way a truncated body does; nothing here touches the network."""
 
     def _ctx(self) -> RequestContext:
         return RequestContext(actor="u", project="p", client="t", request_id="r", issue_project="97")
 
     def _patched(self, module: str):
         import http.client
-        return mock.patch(f"mcp_governance_gateway.{module}.request.urlopen",
-                          side_effect=http.client.IncompleteRead(b""))
 
-    def test_a_truncated_memory_reply_is_memory_backend_unavailable(self) -> None:
-        from mcp_governance_gateway.memory_backend import MemoryBackendError
-        backend = HttpMemoryBackend(
+        class _Truncated:
+            # The status line and headers arrived; the body ends inside a chunk.
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n=-1):
+                raise http.client.IncompleteRead(b"")
+
+        return mock.patch(f"mcp_governance_gateway.{module}.request.urlopen",
+                          return_value=_Truncated())
+
+    def _memory(self) -> HttpMemoryBackend:
+        return HttpMemoryBackend(
             base_url="http://memory.internal:3111", backend_token=None,
             search_path="/agentmemory/search", save_path="/agentmemory/remember",
         )
-        with self._patched("memory_backend"):
-            with self.assertRaises(MemoryBackendError) as cm:
-                backend.search("q", 5, self._ctx())
-        self.assertEqual(str(cm.exception), "memory backend unavailable")
+
+    def test_a_truncated_memory_reply_is_memory_backend_unavailable(self) -> None:
+        from mcp_governance_gateway.memory_backend import MemoryBackendError
+        backend = self._memory()
+        # One case per request path: search POSTs, lesson_list GETs.
+        for name, call in (("post", lambda: backend.search("q", 5, self._ctx())),
+                           ("get", lambda: backend.lesson_list(5, self._ctx()))):
+            with self.subTest(path=name):
+                with self._patched("memory_backend"):
+                    with self.assertRaises(MemoryBackendError) as cm:
+                        call()
+                self.assertEqual(str(cm.exception), "memory backend unavailable")
 
     def test_a_truncated_redmine_reply_is_issue_tracker_unavailable(self) -> None:
         backend = RedmineHttpBackend(base_url="http://tracker.example", api_key="k")
@@ -890,6 +934,23 @@ class BackendFramingErrorTests(unittest.TestCase):
             with self.assertRaises(IssueBackendError) as cm:
                 backend.get("1", self._ctx())
         self.assertEqual(str(cm.exception), "issue tracker unavailable")
+
+    def test_a_truncated_reply_is_answered_and_audited_by_the_dispatcher(self) -> None:
+        # The property the three tests above serve: through handle_rpc the
+        # caller gets a tool error, not silence, and the audit log records it.
+        audit = ListAuditSink()
+        app = GatewayApp(memory_backend=self._memory(), audit_sink=audit)
+        principal = Principal(actor="u@x", project="p", roles=("developer",), token_id="t")
+        with self._patched("memory_backend"):
+            response = app.handle_rpc(
+                {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                 "params": {"name": "memory.search", "arguments": {"query": "q"}}},
+                principal,
+            )
+        assert response is not None
+        self.assertTrue(response["result"]["isError"])
+        self.assertIn("memory backend unavailable", response["result"]["content"][0]["text"])
+        self.assertEqual(audit.events[-1].outcome, "backend_error")
 
 
 class MemoryListingShapeTests(unittest.TestCase):
@@ -1020,6 +1081,8 @@ class CiArtifactRouteTests(unittest.TestCase):
                 # An upstream that chunks its body: http.client de-chunks it and
                 # ignores any Content-Length, but leaves both headers readable.
                 headers = dict(headers, **{"Transfer-Encoding": transfer_encoding})
+            # http.client's own verdict: it decodes a bare "chunked" and nothing else.
+            chunked = transfer_encoding is not None and transfer_encoding.lower() == "chunked"
 
             def __init__(self):
                 self._left = payload
@@ -1087,6 +1150,7 @@ class CiArtifactRouteTests(unittest.TestCase):
 
         class _Html:
             headers = {"Content-Type": "text/html; charset=utf-8", "Content-Length": length}
+            chunked = False
 
             def __init__(self):
                 self._inner = orig_open(None)
@@ -1226,6 +1290,21 @@ class CiArtifactRouteTests(unittest.TestCase):
         event = self.audit.events[-1]
         self.assertEqual(event.outcome, "ok")
         self.assertEqual(event.bytes_sent, len(self.PAYLOAD))
+
+    def test_a_transfer_coding_http_client_did_not_decode_is_refused(self) -> None:
+        # Review, 2026-09-03 (round 6): http.client decodes a bare "chunked" and
+        # nothing else. Under "gzip, chunked" it honours the Content-Length and
+        # hands back the still-coded wire bytes, which the previous predicate
+        # (any Transfer-Encoding header) would have re-chunked and served as
+        # the artifact with a 200 and an "ok" audit line.
+        port = self._server(transfer_encoding="gzip, chunked")
+        response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        self.assertEqual(response.status, 502)
+        self.assertIn("transfer coding", json.loads(body)["error"])
+        self.assertEqual(self.reads, [])          # not one body byte was read
+        self.assertEqual(self.closed, [True])
+        event = self.audit.events[-1]
+        self.assertEqual(event.outcome, "backend_error")
 
     def test_an_upstream_that_drops_mid_stream_leaves_the_body_incomplete(self) -> None:
         # No length and the upstream dies after the first chunk: no terminator is
