@@ -927,7 +927,7 @@ class CiArtifactRouteTests(unittest.TestCase):
 
     def _server(self, project="proj-a", artifact_path="out/image.bin",
                 max_bytes=None, max_concurrent=None, declare_length=True, block=None,
-                declared_length=None):
+                declared_length=None, drop_after=None):
         import threading
         import time
 
@@ -981,6 +981,9 @@ class CiArtifactRouteTests(unittest.TestCase):
                 # concurrency cap can be observed instead of raced against.
                 if block is not None and reads:
                     block.wait(timeout=5)
+                # `drop_after` makes the upstream die mid-stream after that many reads.
+                if drop_after is not None and len(reads) >= drop_after:
+                    raise OSError("upstream connection reset")
                 chunk, self._left = self._left[:n], self._left[n:]
                 reads.append(len(chunk))
                 return chunk
@@ -1127,6 +1130,26 @@ class CiArtifactRouteTests(unittest.TestCase):
         # bytes_sent counts what was written, so it can never exceed the cap the
         # stream was stopped at.
         self.assertLessEqual(event.bytes_sent, 100_000)
+
+    def test_an_upstream_that_drops_mid_stream_leaves_the_body_incomplete(self) -> None:
+        # No length and the upstream dies after the first chunk: no terminator is
+        # written and the connection is closed, so the client learns at once that
+        # the body is incomplete instead of waiting on keep-alive for the rest.
+        import http.client
+
+        port = self._server(declare_length=False, drop_after=1)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/ci/artifact?job=swarm-build&build=291&path=out/image.bin",
+                     headers={"Authorization": "Bearer tok-a"})
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        with self.assertRaises(http.client.IncompleteRead):  # not a timeout: the close is prompt
+            response.read()
+        conn.close()
+        event = self.audit.events[-1]
+        self.assertEqual(event.outcome, "interrupted")
+        self.assertGreater(event.bytes_sent, 0)
+        self.assertLess(event.bytes_sent, len(self.PAYLOAD))
 
     def test_an_upstream_without_a_length_is_chunk_delimited(self) -> None:
         # No upstream length: the body is chunked, so it is self-delimiting (a

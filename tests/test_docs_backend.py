@@ -485,8 +485,9 @@ class ReposHotReloadTests(unittest.TestCase):
                 self.repos_file.write_text(json.dumps({key: {"url": "x", "branch": "main"}}))
                 with self.assertRaises(ValueError):
                     load_docs_repos(str(self.repos_file))
-        self.repos_file.write_text(json.dumps({"ok-name.v2": {"url": "x", "branch": "main"}}))
-        self.assertIn("ok-name.v2", load_docs_repos(str(self.repos_file)))
+        for key in ("ok-name.v2", "_scratch"):  # dots inside and a leading underscore stay legal
+            self.repos_file.write_text(json.dumps({key: {"url": "x", "branch": "main"}}))
+            self.assertIn(key, load_docs_repos(str(self.repos_file)))
 
     def test_no_repos_file_means_no_reload_attempt(self):
         corpus = DocsCorpus({"p": {"url": self.remote, "branch": "master"}},

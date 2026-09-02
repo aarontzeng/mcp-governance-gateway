@@ -30,7 +30,7 @@ from typing import Any
 from .memory_backend import ActorLabels, RequestContext, _display_actor
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
-_PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # no leading dot: not ".", "..", ".git"
+_PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")  # no leading dot: not ".", "..", ".git"
 _CJK_RE = re.compile("[\\u3400-\\u9fff]")
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.M)
