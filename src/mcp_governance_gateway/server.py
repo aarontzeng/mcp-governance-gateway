@@ -44,10 +44,17 @@ class SameOriginRedirects(request.HTTPRedirectHandler):
     along. Every request this process makes carries a backend credential, so a
     redirect may only stay on the origin the request was sent to."""
 
+    @staticmethod
+    def _origin(url: str) -> tuple[str, str, int | None]:
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        # An explicit default port names the same origin as no port at all.
+        port = parts.port if parts.port is not None else {"http": 80, "https": 443}.get(scheme)
+        return scheme, (parts.hostname or "").lower(), port
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        origin = urlsplit(req.full_url)
-        target = urlsplit(newurl)
-        if (target.scheme.lower(), target.netloc.lower()) != (origin.scheme.lower(), origin.netloc.lower()):
+        if self._origin(newurl) != self._origin(req.full_url):
+            target = urlsplit(newurl)
             raise error.URLError(f"redirect leaves the backend's origin: {code} to {target.scheme}://{target.netloc}")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -174,9 +181,12 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     self._send_json(int(exc.status or 502), {"error": str(exc)})
                     return
                 cap = self.server.artifact_max_bytes
-                if upstream.headers.get("Content-Encoding", "identity").strip().lower() not in ("", "identity"):
+                codings = [field.strip().lower() for field in upstream.headers.get_all("Content-Encoding", [])]
+                if any(c not in ("", "identity") for c in codings):
                     # The request asked for identity; a body coded anyway is not
                     # the artifact, and the client would save it under its name.
+                    # Every field is read: http.client's get() returns only the
+                    # first of a repeated header.
                     audit("backend_error", "upstream content coding is not one this gateway decodes")
                     upstream.close()
                     self._send_json(HTTPStatus.BAD_GATEWAY,

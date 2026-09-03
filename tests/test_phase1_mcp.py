@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import http.client
 import io
 import json
 import os
@@ -1060,6 +1061,19 @@ class SameOriginRedirectTests(unittest.TestCase):
         assert followed is not None
         self.assertEqual(followed.full_url, "https://CI.internal:8443/job/x/291/api/json")
 
+    def test_an_explicit_default_port_is_the_same_origin(self) -> None:
+        # Round 8: a proxy that redirects "https://ci.internal/x" to
+        # "https://ci.internal:443/x" names the same origin; comparing the raw
+        # netloc refused it as a backend failure on every request.
+        from urllib import error, request
+        from mcp_governance_gateway.server import SameOriginRedirects
+        req = request.Request("https://ci.internal/job/x/lastBuild/api/json")
+        followed = SameOriginRedirects().redirect_request(req, None, 302, "Found", {}, "https://ci.internal:443/job/x/291/api/json")
+        assert followed is not None
+        self.assertEqual(followed.full_url, "https://ci.internal:443/job/x/291/api/json")
+        with self.assertRaises(error.URLError):   # the default port of the OTHER scheme is not
+            SameOriginRedirects().redirect_request(req, None, 302, "Found", {}, "https://ci.internal:80/job/x")
+
     def test_build_server_installs_the_handler_process_wide(self) -> None:
         from urllib import request
         from mcp_governance_gateway.server import SameOriginRedirects
@@ -1198,19 +1212,23 @@ class CiArtifactRouteTests(unittest.TestCase):
         reads, closed = self.reads, self.closed
 
         class _Upstream:
+            # The header object is what http.client hands back (an HTTPMessage),
+            # so a repeated field is readable the way the route reads it.
+            headers = http.client.HTTPMessage()
+            headers["Content-Type"] = "application/octet-stream"
             # `declared_length` lets a test make the upstream promise a length it
             # does not deliver.
-            headers = ({"Content-Type": "application/octet-stream",
-                        "Content-Length": str(declared_length if declared_length is not None else len(payload))}
-                       if declare_length else {"Content-Type": "application/octet-stream"})
+            if declare_length:
+                headers["Content-Length"] = str(declared_length if declared_length is not None else len(payload))
             if transfer_encoding is not None:
                 # An upstream that chunks its body: http.client de-chunks it and
                 # ignores any Content-Length, but leaves both headers readable.
-                headers = dict(headers, **{"Transfer-Encoding": transfer_encoding})
-            if content_encoding is not None:
-                # A body coded despite Accept-Encoding: identity; http.client
-                # decodes no content coding, so the bytes arrive as sent.
-                headers = dict(headers, **{"Content-Encoding": content_encoding})
+                headers["Transfer-Encoding"] = transfer_encoding
+            # A body coded despite Accept-Encoding: identity; http.client decodes
+            # no content coding, so the bytes arrive as sent. A tuple sends the
+            # field more than once.
+            for coding in ((content_encoding,) if isinstance(content_encoding, str) else content_encoding or ()):
+                headers["Content-Encoding"] = coding
             # http.client's own verdict: it decodes a bare "chunked" and nothing else.
             chunked = transfer_encoding is not None and transfer_encoding.lower() == "chunked"
 
@@ -1279,7 +1297,9 @@ class CiArtifactRouteTests(unittest.TestCase):
         length = str(len(self.PAYLOAD))
 
         class _Html:
-            headers = {"Content-Type": "text/html; charset=utf-8", "Content-Length": length}
+            headers = http.client.HTTPMessage()
+            headers["Content-Type"] = "text/html; charset=utf-8"
+            headers["Content-Length"] = length
             chunked = False
 
             def __init__(self):
@@ -1446,6 +1466,16 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertIn("content coding", json.loads(body)["error"])
         self.assertEqual(self.reads, [])
         self.assertEqual(self.closed, [True])
+        self.assertEqual(self.audit.events[-1].outcome, "backend_error")
+
+    def test_a_content_coding_hidden_behind_a_repeated_identity_field_is_refused(self) -> None:
+        # Round 8: HTTPMessage.get() returns the first of a repeated header, so
+        # `Content-Encoding: identity` followed by `Content-Encoding: gzip` read
+        # as identity and the gzip body was served again.
+        port = self._server(content_encoding=("identity", "gzip"))
+        response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        self.assertEqual(response.status, 502)
+        self.assertEqual(self.reads, [])
         self.assertEqual(self.audit.events[-1].outcome, "backend_error")
 
     def test_an_identity_content_coding_is_the_artifact_itself(self) -> None:
