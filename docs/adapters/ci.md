@@ -72,11 +72,15 @@ would be the one operation the gateway performed and did not record.
 
 The bytes served are the bytes the build wrote: the gateway asks Jenkins for an
 identity-coded body and answers 502 (`backend_error`) if the upstream codes it
-anyway, whether a transfer coding `http.client` does not decode or any
-`Content-Encoding` — a gzip stream saved under the artifact's own name would be
-silent corruption. Redirects are followed only within the origin the request
-went to; one that leaves it (another host, `ftp://`) is a backend failure, so a
-Jenkins credential never travels with it.
+anyway, whether a `Transfer-Encoding` that is anything but the single bare
+`chunked` field `http.client` itself de-chunks, or a `Content-Encoding` naming a
+coding other than `identity` — a gzip stream saved under the artifact's own name
+would be silent corruption. An empty field in either header names no coding and
+is served as the identity bytes it is. Redirects are followed
+only within the origin the request went to; one that leaves it (another host,
+`ftp://`) is a backend failure, so a Jenkins credential never travels with it.
+That rule is installed process-wide by `build_server`, so it covers every
+backend credential the gateway sends, not only Jenkins'.
 
 Honest cost that remains: the gateway is a data path, so a 200 MB pull is 200 MB
 in and out of the host. Range/resume is not passed through, so an interrupted

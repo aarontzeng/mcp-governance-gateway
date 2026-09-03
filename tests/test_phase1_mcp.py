@@ -1075,7 +1075,7 @@ class SameOriginRedirectTests(unittest.TestCase):
             SameOriginRedirects().redirect_request(req, None, 302, "Found", {}, "https://ci.internal:80/job/x")
 
     def test_build_server_installs_the_handler_process_wide(self) -> None:
-        from urllib import request
+        from urllib import error, request
         from mcp_governance_gateway.server import SameOriginRedirects
         tf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
         json.dump({"tokens": [{"token": "t", "actor": "a", "project": "p", "roles": ["developer"]}]}, tf)
@@ -1091,6 +1091,25 @@ class SameOriginRedirectTests(unittest.TestCase):
         self.addCleanup(srv.server_close)
         installed = request._opener      # what urlopen will use from now on
         self.assertTrue(any(isinstance(h, SameOriginRedirects) for h in installed.handlers))
+
+        # Round 10: the handler is not only installed but in the path urlopen
+        # takes -- a real 302 to another port is refused before it is followed.
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class _Redirecting(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:9/x")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        origin = HTTPServer(("127.0.0.1", 0), _Redirecting)
+        self.addCleanup(origin.server_close)
+        threading.Thread(target=origin.handle_request, daemon=True).start()
+        with self.assertRaisesRegex(error.URLError, "leaves the backend's origin"):
+            request.urlopen(f"http://127.0.0.1:{origin.server_address[1]}/job", timeout=5)
 
 
 class MemoryListingShapeTests(unittest.TestCase):
@@ -1220,17 +1239,20 @@ class CiArtifactRouteTests(unittest.TestCase):
             # does not deliver.
             if declare_length:
                 headers["Content-Length"] = str(declared_length if declared_length is not None else len(payload))
-            if transfer_encoding is not None:
-                # An upstream that chunks its body: http.client de-chunks it and
-                # ignores any Content-Length, but leaves both headers readable.
-                headers["Transfer-Encoding"] = transfer_encoding
+            # An upstream that chunks its body: http.client de-chunks it and
+            # ignores any Content-Length, but leaves both headers readable. A
+            # tuple sends the field more than once.
+            for coding in ((transfer_encoding,) if isinstance(transfer_encoding, str) else transfer_encoding or ()):
+                headers["Transfer-Encoding"] = coding
             # A body coded despite Accept-Encoding: identity; http.client decodes
             # no content coding, so the bytes arrive as sent. A tuple sends the
             # field more than once.
             for coding in ((content_encoding,) if isinstance(content_encoding, str) else content_encoding or ()):
                 headers["Content-Encoding"] = coding
-            # http.client's own verdict: it decodes a bare "chunked" and nothing else.
-            chunked = transfer_encoding is not None and transfer_encoding.lower() == "chunked"
+            # http.client's own verdict: it decodes a bare "chunked" and nothing
+            # else, read from the FIRST field of a repeated header.
+            first_transfer = headers.get("Transfer-Encoding")
+            chunked = first_transfer is not None and first_transfer.lower() == "chunked"
 
             def __init__(self):
                 self._left = payload
@@ -1455,6 +1477,33 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertEqual(self.closed, [True])
         event = self.audit.events[-1]
         self.assertEqual(event.outcome, "backend_error")
+
+    def test_a_transfer_coding_hidden_behind_a_repeated_field_is_refused(self) -> None:
+        # Round 10: http.client's chunked verdict reads only the first field of
+        # a repeated Transfer-Encoding header, so "chunked" then "gzip" was
+        # de-chunked and the gzip bytes served, and "" then "gzip" passed the
+        # old truthiness check on the first field alone.
+        for fields in (("chunked", "gzip"), ("", "gzip")):
+            with self.subTest(fields=fields):
+                port = self._server(transfer_encoding=fields)
+                response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+                self.assertEqual(response.status, 502)
+                self.assertIn("transfer coding", json.loads(body)["error"])
+                self.assertEqual(self.reads, [])
+                self.assertEqual(self.audit.events[-1].outcome, "backend_error")
+
+    def test_an_empty_transfer_encoding_field_names_no_coding(self) -> None:
+        # Round 11: two reviewers read `any(transfer)` as a hole for a field of
+        # only whitespace. This pins the route's reading instead: an empty field
+        # names no coding, so the Content-Length bytes are served -- the same
+        # reading the Content-Encoding check gives an empty field. The fake's
+        # unstripped " " and the "" http.client's parser would store (checked
+        # by hand on 3.10.12) reach the same [""] after the route's strip().
+        port = self._server(transfer_encoding=" ")
+        response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body, self.PAYLOAD)
+        self.assertEqual(self.audit.events[-1].outcome, "ok")
 
     def test_a_content_coding_http_client_did_not_decode_is_refused(self) -> None:
         # Round 7: `Content-Encoding: gzip` with a plain Content-Length passed

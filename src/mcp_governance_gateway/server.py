@@ -192,16 +192,21 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                     self._send_json(HTTPStatus.BAD_GATEWAY,
                                     {"error": "CI sent the artifact under a content coding this gateway cannot decode"})
                     return
-                if upstream.chunked:
+                transfer = [field.strip().lower() for field in upstream.headers.get_all("Transfer-Encoding", [])]
+                if upstream.chunked and transfer == ["chunked"]:
                     # The upstream's own framing wins (RFC 9112 section 6.3):
                     # http.client de-chunked the body and ignores the
                     # Content-Length, but the header is still there to read, and
                     # forwarding it would promise a length the body need not have.
                     declared = 0
-                elif upstream.headers.get("Transfer-Encoding"):
-                    # http.client decodes a bare "chunked" and nothing else, so
-                    # under any other value what it reads is still transfer-coded:
-                    # not the artifact, and not something to serve as one.
+                elif any(transfer):
+                    # http.client decodes a bare "chunked" and nothing else, and
+                    # its verdict reads only the first field of a repeated header,
+                    # so under any other value -- in any field -- the route does
+                    # not vouch for the bytes it hands over (a second "chunked"
+                    # field is at best a coding applied twice; "identity" is a
+                    # token IANA lists as withdrawn) and refuses rather than
+                    # serve them.
                     audit("backend_error", "upstream transfer coding is not one this gateway decodes")
                     upstream.close()
                     self._send_json(HTTPStatus.BAD_GATEWAY,
