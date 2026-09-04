@@ -32,6 +32,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
+import re
 import sys
 import threading
 import time
@@ -65,6 +67,14 @@ _MAX_JWKS_BYTES = 256_000
 _JWKS_TIMEOUT_SEC = 5.0
 
 
+# The unpadded base64url alphabet, and nothing else. Checked on every segment
+# BEFORE any of them is used, which is also what keeps the signing input ASCII:
+# `f"{h}.{p}".encode("ascii")` on a segment carrying a non-ASCII character raises
+# UnicodeEncodeError, which is not an AuthError and would surface as a 500 --
+# telling a caller their input reached the parser.
+_B64URL_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+
+
 def _b64url(segment: str) -> bytes:
     """Decode one base64url JWS segment.
 
@@ -73,13 +83,19 @@ def _b64url(segment: str) -> bytes:
     a decoder that accepts several is a decoder two implementations can disagree
     about.
     """
-    if not segment or any(c in segment for c in "=+/\n\r \t"):
+    if not _B64URL_RE.match(segment or ""):
         raise AuthError("malformed token encoding")
     pad = "=" * (-len(segment) % 4)
     try:
         return base64.urlsafe_b64decode(segment + pad)
     except (ValueError, TypeError) as exc:
         raise AuthError("malformed token encoding") from exc
+
+
+def _finite_number(value: object) -> bool:
+    """A JSON number we can compare against a clock. Excludes bools (an int in
+    Python) and the non-standard `NaN`/`Infinity` literals `json.loads` accepts."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _json_object(raw: bytes, what: str) -> dict[str, Any]:
@@ -100,7 +116,7 @@ def looks_like_jws(token: str) -> bool:
     against the token file first (see CompositeAuthenticator).
     """
     parts = token.split(".")
-    return len(parts) == 3 and all(parts)
+    return len(parts) == 3 and all(_B64URL_RE.match(p) for p in parts)
 
 
 # --- keys ----------------------------------------------------------------
@@ -150,7 +166,7 @@ class JwksCache:
         with request.urlopen(req, timeout=_JWKS_TIMEOUT_SEC) as response:
             return response.read(_MAX_JWKS_BYTES)
 
-    def _load(self) -> None:
+    def _fetch_keys(self) -> dict[str, Any]:
         raw = self._open(self._url)
         payload = _json_object(raw, "key set")
         entries = payload.get("keys")
@@ -167,27 +183,43 @@ class JwksCache:
             keys[kid if isinstance(kid, str) and kid else ""] = key
         if not keys:
             raise ValueError("key set contains no usable signing key")
-        self._keys = keys
-        self._fetched_at = time.monotonic()
+        return keys
 
     def get(self, kid: str | None) -> Any:
+        """The key for `kid`, refreshing at most one caller at a time.
+
+        The fetch happens OUTSIDE the lock. Holding it across a five-second
+        `urlopen` would make one slow IdP block every other OIDC authentication
+        in the process -- a rotation, or an attacker feeding JWS-shaped garbage
+        with a rotating unknown `kid`, becomes head-of-line blocking rather than
+        a slow request. The `_last_attempt` stamp is still claimed under the lock,
+        so only one thread fetches; the others use the last-good keys meanwhile.
+        """
         now = time.monotonic()
         with self._lock:
             stale = not self._keys or (now - self._fetched_at) > self._ttl
             unknown = bool(self._keys) and kid is not None and kid not in self._keys
-            if (stale or unknown) and (now - self._last_attempt) > self._cooldown:
+            mine = (stale or unknown) and (now - self._last_attempt) > self._cooldown
+            if mine:
                 self._last_attempt = now
-                try:
-                    self._load()
-                except Exception as exc:  # noqa: BLE001 - any failure keeps last-good
-                    # Loud, and non-fatal: a rotation we could not fetch fails the
-                    # requests using the new kid, not every request.
-                    print(f"OIDC key set fetch failed; keeping the last-good keys: {exc}",
-                          file=sys.stderr, flush=True)
-            if kid:
-                return self._keys.get(kid)
-            # No kid in the header: unambiguous only when the issuer publishes one key.
-            return next(iter(self._keys.values())) if len(self._keys) == 1 else None
+        if mine:
+            try:
+                keys = self._fetch_keys()
+            except Exception as exc:  # noqa: BLE001 - any failure keeps last-good
+                # Loud, and non-fatal: a rotation we could not fetch fails the
+                # requests using the new kid, not every request.
+                print(f"OIDC key set fetch failed; keeping the last-good keys: {exc}",
+                      file=sys.stderr, flush=True)
+            else:
+                with self._lock:
+                    self._keys = keys
+                    self._fetched_at = time.monotonic()
+        with self._lock:
+            keys = self._keys
+        if kid:
+            return keys.get(kid)
+        # No kid in the header: unambiguous only when the issuer publishes one key.
+        return next(iter(keys.values())) if len(keys) == 1 else None
 
 
 def _verify_signature(alg: str, key: Any, signing_input: bytes, signature: bytes) -> None:
@@ -206,8 +238,14 @@ def _verify_signature(alg: str, key: Any, signing_input: bytes, signature: bytes
             raise AuthError("token signature is not valid")
         r = int.from_bytes(signature[:half], "big")
         s = int.from_bytes(signature[half:], "big")
+        # A valid ECDSA signature has 0 < r,s < n. Rejecting the zeroes here rather
+        # than letting encode_dss_signature decide keeps the answer the same across
+        # `cryptography` versions -- some accept (0, 0) and let the verify fail,
+        # newer ones raise ValueError, which is not an AuthError.
+        if r == 0 or s == 0:
+            raise AuthError("token signature is not valid")
         key.verify(asym_utils.encode_dss_signature(r, s), signing_input, ec.ECDSA(digest))
-    except InvalidSignature as exc:
+    except (InvalidSignature, ValueError) as exc:
         raise AuthError("token signature is not valid") from exc
 
 
@@ -230,13 +268,25 @@ class GrantsFile:
     fail-closed direction.
     """
 
+    _COMPLAIN_EVERY_SEC = 30.0
+
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._lock = threading.Lock()
         self._subjects: dict[str, Grant] = {}
         self._groups: dict[str, Grant] = {}
         self._sig: object = object()
+        self._stale = False           # last parse failed; the live map may be out of date
+        self._last_complaint = 0.0
         self._reload(initial=True)
+
+    @property
+    def stale(self) -> bool:
+        """True when the file on disk could not be parsed and the live mapping is
+        therefore whatever loaded last. Surfaced on /healthz: this is an ALLOW-list,
+        so keeping the last-good copy is fail-OPEN, and an operator whose offboarding
+        edit did not parse needs to find that out from something other than stderr."""
+        return self._stale
 
     def _current_sig(self) -> tuple | None:
         try:
@@ -282,14 +332,21 @@ class GrantsFile:
                     if grant is not None:
                         groups[str(key)] = grant
                 self._subjects, self._groups = subjects, groups
+                self._stale = False
+                self._sig = sig
             except Exception as exc:  # noqa: BLE001
                 if initial:
                     raise
-                # Keep the last-good mapping, exactly as the token file does, and say
-                # so: a grant *removed* in a corrupt file has not taken effect.
-                print(f"OIDC grants reload failed; keeping the last-good grants: {exc}",
-                      file=sys.stderr, flush=True)
-            self._sig = sig
+                # Keep the last-good mapping -- a typo must not lock everyone out --
+                # but do NOT record the corrupt file as seen. This is an allow-list,
+                # so last-good is fail-OPEN: a revoked grant is still live, and the
+                # next call must retry rather than wait for another mtime change.
+                self._stale = True
+                now = time.monotonic()
+                if now - self._last_complaint > self._COMPLAIN_EVERY_SEC:
+                    self._last_complaint = now
+                    print(f"OIDC grants reload failed; keeping the last-good grants "
+                          f"(a removed grant is STILL LIVE): {exc}", file=sys.stderr, flush=True)
 
     def resolve(self, subject: str, groups: tuple[str, ...]) -> Grant | None:
         """A subject's own grant, else the union of its groups' grants.
@@ -344,7 +401,11 @@ class OidcAuthenticator:
         self._required_scope = required_scope or None
 
     def authenticate(self, token: str) -> Principal:
-        if len(token.encode("utf-8", errors="ignore")) > _MAX_TOKEN_BYTES:
+        # Measured in characters, not in bytes-after-dropping-the-undecodable
+        # ones: http.server hands us a latin-1 str, so every character is one
+        # byte on the wire and an encode with errors="ignore" would let an
+        # oversized token shrink its way under the bound.
+        if len(token) > _MAX_TOKEN_BYTES:
             raise AuthError("token too large")
         # Checked here rather than left to the caller: `split` on a four-segment
         # value raises ValueError, which is not an AuthError and would surface as
@@ -403,15 +464,17 @@ class OidcAuthenticator:
 
         now = time.time()
         exp = claims.get("exp")
-        if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        # `json.loads` turns the perfectly legal-looking `1e999` into float('inf'),
+        # and `now > inf` is False -- so without isfinite this reads as a token that
+        # simply has not expired yet, and never will.
+        if not _finite_number(exp):
             raise AuthError("token has no expiry")  # a token that never expires is not one
         if now > float(exp) + self._skew:
             raise AuthError("token has expired")
         for name, message in (("nbf", "token is not valid yet"), ("iat", "token is issued in the future")):
             value = claims.get(name)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if float(value) > now + self._skew:
-                    raise AuthError(message)
+            if _finite_number(value) and float(value) > now + self._skew:
+                raise AuthError(message)
 
         if self._required_scope and self._required_scope not in self._scopes(claims):
             raise AuthError("token lacks the required scope")

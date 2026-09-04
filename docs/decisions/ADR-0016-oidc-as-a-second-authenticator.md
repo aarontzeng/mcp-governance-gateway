@@ -38,16 +38,32 @@ deployment that configures no OIDC variables behaves exactly as it did in
 0.1.0. `GATEWAY_TOKEN_FILE` becomes optional only when `OIDC_ISSUER` is set,
 because an IdP-only deployment has no opaque tokens to store.
 
-**The IdP supplies `sub` → `actor`, and nothing else that matters.** `email`
-stays a display label, as ADR-0007 already requires. `project`,
-`issue_project` and `roles` come from a **grants file this deployment owns**,
-resolved by subject and then by group. A `project` claim inside a token is
-ignored.
+**The IdP supplies identity. The grants file supplies tenancy.** `sub` becomes
+`actor` and `email` stays a display label, as ADR-0007 already requires.
+`project`, `issue_project` and `roles` come from a **grants file this deployment
+owns**, resolved by subject and then by group. A `project` or `roles` claim
+inside a token is ignored outright.
 
-That is the load-bearing half. An IdP knows who someone is. It does not know
-which tenant of *this* gateway they may act in, and a `project` claim minted
-elsewhere would make our tenant boundary a function of somebody else's client
-configuration — including, on a shared IdP, of a client we do not administer.
+Be precise about what that does and does not buy, because the short version —
+"tenancy never comes from the token" — is not quite true. Where a deployment
+uses the `groups` map, the IdP's group claim **selects which grant applies**.
+The token cannot invent a project, but it can choose from the menu this
+deployment wrote. That is the distinction that matters: the set of reachable
+projects, and the roles attached to each, are ours; which of them a given token
+lands on is the IdP's. A deployment that does not want even that leaves
+`groups` empty and lists subjects, which is why both maps exist.
+
+The reason to keep the menu here rather than take a `project` claim outright: on
+a shared IdP the client that mints those claims is often administered by other
+people, and a mapper added there would silently become a tenant boundary here. A
+group name we do not recognize resolves to nothing.
+
+**A subject row is the whole answer, not an addition.** When a subject matches,
+its groups are not consulted at all — so an explicit row with empty `roles`
+takes away what the groups would have given. That is what "explicit override"
+has to mean for it to be usable during an incident, and the example file says so
+because it is the kind of thing that surprises people exactly once.
+
 A subject with no grant is authenticated and has no project, which
 `Policy.decide` already refuses: the fail-closed direction, reached without a
 new code path.
@@ -71,11 +87,23 @@ unknown `kid` triggers at most one refetch per cooldown, and a fetch failure
 keeps the last-good keys and says so on stderr. An IdP outage must not revoke
 everyone; a rotation must not become a stampede.
 
-**`token_id` is derived from `iss|sub`, not from the token string.** An access
-token is refreshed every few minutes. The confirmation store binds a pending
-write to the principal's `token_id`, and binding it to the token *instance*
-would expire every pending confirmation the moment a client refreshed — while
-protecting nothing the identity binding does not already protect.
+**`token_id` is derived from `iss|sub`, not from the token string**, and this
+one is a real trade rather than a free win. An access token is refreshed every
+few minutes while a confirmation lives for five, so binding a pending write to
+the token *instance* would expire confirmations whenever a client refreshed —
+a failure that would look random and would land on the write path.
+
+What it costs: for an OIDC caller the confirmation is bound to the **identity**,
+not to the credential. `confirm.py`'s identity key is
+`actor | project | token_id | issue_project | tool`, and with `actor == sub` and
+`token_id == f(iss, sub)` the credential drops out of it. A second session of the
+same person — a refreshed token, a second agent they attached — can therefore
+commit a confirmation the first one prepared, given identical arguments. It
+gains no authority that session did not already have (it could call prepare
+itself), but a `confirmationId` that leaks into a transcript or into un-gated
+team memory becomes a *user*-level capability for its 300 seconds rather than a
+credential-level one. `SECURITY.md` lists it among the known limitations rather
+than leaving it to be found.
 
 ## Alternatives Considered
 
@@ -110,7 +138,9 @@ protecting nothing the identity binding does not already protect.
 - Cons: a dependency for something `cryptography` — already required for the
   credential store — verifies directly, in a project whose deployment story is
   "one process, one third-party dependency".
-- Rejected. The verification is ~120 lines and the parts worth getting right
+- Rejected. The verification proper is ~120 lines (the module is larger
+  because it also carries the key cache, the grants file and discovery), and
+  the parts worth getting right
   (the algorithm allow-list, the audience check, ECDSA's raw R||S encoding) are
   exactly the parts a library would hide.
 

@@ -59,10 +59,14 @@ in the file.
 The OIDC path takes only the identity. `sub` becomes the actor — the verified,
 immutable id ADR-0007 asks a minter for — and `email` stays a display label.
 `project`, `issue_project` and `roles` come from a grants file **this
-deployment owns**, resolved by subject and then by group; a `project` claim
-inside a token is ignored, so the tenant boundary never becomes a function of
-somebody else's IdP client configuration. A subject with no grant is
-authenticated and has no project, which every tool then denies.
+deployment owns**, resolved by subject and then by group; a `project` or `roles`
+claim inside a token is ignored. Where the `groups` map is used, the IdP's group
+claim does select *which* grant applies — the token chooses from a menu this
+deployment wrote, and cannot add to it. A deployment that wants no such
+influence lists subjects instead (ADR-0016). A subject row is an override, not
+an addition: when one matches, groups are not consulted, so an explicit row with
+empty roles takes away what the groups would have given. A subject with no grant
+is authenticated and has no project, which every tool then denies.
 
 Two verification rules do not bend: the signature algorithm comes from an
 allow-list in code (`alg: none` and every HMAC algorithm are refused *before* a
@@ -73,8 +77,10 @@ OIDC block is refused at boot rather than silently disabled.
 An IdP outage keeps the last-good key set rather than revoking everyone, the
 same posture the token file's hot reload already takes.
 
-Where no IdP is available, short-lived per-user gateway tokens remain the
-supported path.
+Where no IdP is available, per-user gateway tokens remain the supported path,
+minted by `mcpgw-admin`. They do **not** expire on their own — nothing in the
+opaque path validates a lifetime — so rotation is an operator action
+(`mcpgw-admin rotate`) and revocation is removing the entry.
 
 Gateway tokens must be audience-bound to the gateway endpoint. Tokens issued for
 other resources must be rejected.

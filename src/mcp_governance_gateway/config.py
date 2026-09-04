@@ -57,6 +57,13 @@ class Settings:
     # issuer mints tokens for many audiences and accepting all of them would let
     # a token issued for an unrelated client act here. Tenancy comes from the
     # grants file, never from a claim the IdP controls.
+    # Admin listener (roadmap: "credential enrollment: a primitive, not a portal").
+    # Unset -> the /internal/* credential routes stay on the MCP listener, as in
+    # 0.1.0. Set -> they move to their own socket and the MCP listener answers 404
+    # for them, so an ingress that exposes /mcp publicly cannot expose enrollment
+    # with it. Host defaults to loopback: this surface must not be routed publicly.
+    admin_port: int | None = None
+    admin_host: str = "127.0.0.1"
     oidc_issuer: str | None = None
     oidc_audience: str | None = None
     oidc_jwks_url: str | None = None          # unset -> discovered from the issuer
@@ -147,6 +154,8 @@ class Settings:
             gitlab_timeout_sec=_timeout_env("GITLAB_TIMEOUT_SEC"),
             gitlab_enforce_personal_key=_bool_env("GITLAB_ENFORCE_PERSONAL_KEY"),
             credential_portal_url=os.environ.get("CREDENTIAL_PORTAL_URL") or None,
+            admin_port=_optional_port_env("ADMIN_PORT"),
+            admin_host=os.environ.get("ADMIN_HOST", "127.0.0.1"),
             oidc_issuer=oidc_issuer,
             oidc_audience=oidc_audience,
             oidc_jwks_url=_url_env("OIDC_JWKS_URL"),
@@ -202,6 +211,16 @@ def _url_env(name: str, default: str | None = None) -> str | None:
 
 
 _MAX_TIMEOUT_SEC = 3600.0
+
+
+def _optional_port_env(name: str) -> int | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{name} must be a TCP port between 1 and 65535")
+    return port
 
 
 def _timeout_env(name: str, default: float = 10.0) -> float:

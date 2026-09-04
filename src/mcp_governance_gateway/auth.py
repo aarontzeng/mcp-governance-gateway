@@ -55,15 +55,41 @@ class BearerTokenAuthenticator:
         return cls.from_files([(path, True)])
 
     @classmethod
-    def from_files(cls, sources: list[tuple[str | Path, bool]]) -> "BearerTokenAuthenticator":
+    def from_files(cls, sources: list[tuple[str | Path, bool]],
+                   allow_empty: bool = False) -> "BearerTokenAuthenticator":
+        """`allow_empty` is for a deployment whose identities come from elsewhere.
+
+        The empty-merge guard exists to catch a misconfigured token store, which
+        is the right default. It is wrong for an OIDC deployment that also names
+        a runtime store: that file is legitimately empty until the first token is
+        minted into it, and refusing to boot over it would make configuring both
+        paths a startup failure.
+        """
         norm = [(Path(p), bool(required)) for p, required in sources]
-        return cls(cls._load_all(norm), sources=norm)
+        merged = cls._merge_sources(norm)
+        if not merged and not allow_empty:
+            raise ValueError("no tokens loaded from any source")
+        return cls(merged, sources=norm)
 
     @staticmethod
-    def _load_all(sources: list[tuple[Path, bool]]) -> dict[str, Principal]:
+    def _merge_sources(sources: list[tuple[Path, bool]]) -> dict[str, Principal]:
         merged: dict[str, Principal] = {}
         for path, required in sources:
             merged.update(_load_token_claims(path, required=required))
+        return merged
+
+    @staticmethod
+    def _load_all(sources: list[tuple[Path, bool]]) -> dict[str, Principal]:
+        """The RELOAD path, whose emptiness rule is not the startup one.
+
+        An empty merge here raises so `_maybe_reload` keeps the last-good map: a
+        botched write must never lock everyone out, and that is true whether or
+        not the deployment also has an IdP. Startup is the different case -- a
+        runtime store is legitimately empty before the first token is minted --
+        so `from_files` applies its own policy and this stays one-argument,
+        which is also the seam the reload-ordering test patches.
+        """
+        merged = BearerTokenAuthenticator._merge_sources(sources)
         if not merged:
             raise ValueError("no tokens loaded from any source")
         return merged

@@ -71,6 +71,20 @@ class GatewayHTTPServer(ThreadingHTTPServer):
     audit_sink: AuditSink | None = None            # artifact transfers are audited here
     artifact_max_bytes: int = 256 * 1024 * 1024
     artifact_streams: "threading.Semaphore" = threading.Semaphore(4)
+    # Which surfaces this listener answers. One process may run two: the MCP
+    # listener agents reach, and an admin listener for credential enrollment.
+    # A route this listener does not serve is 404, not 403 -- an admin surface
+    # that is not routed here should look absent rather than forbidden.
+    serves_mcp: bool = True
+    serves_internal: bool = True
+    oidc_grants: "GrantsFile | None" = None   # for the /healthz staleness flag
+
+
+# `/internal/redmine-key` was named when Redmine was the only backend; the store
+# now holds GitLab credentials too. The old spelling stays an alias forever --
+# it is what every deployed enrollment page calls.
+_CREDENTIAL_PATHS = ("/internal/credentials", "/internal/redmine-key")
+_MY_ISSUES_PATH = "/internal/my-issues"
 
 
 def is_origin_allowed(origin: str | None, allowed_origins: tuple[str, ...]) -> bool:
@@ -103,10 +117,13 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 payload: dict[str, Any] = {"ok": True}
                 if self.server.keystore is not None:
                     payload["keystoreDegraded"] = self.server.keystore.degraded
+                if self.server.oidc_grants is not None:
+                    # An allow-list whose last edit did not parse is fail-OPEN.
+                    payload["oidcGrantsStale"] = self.server.oidc_grants.stale
                 self._send_json(HTTPStatus.OK, payload)
                 return
             path = self.path.split("?")[0].rstrip("/")
-            if path in ("/internal/redmine-key", "/internal/my-issues"):
+            if path in _CREDENTIAL_PATHS or path == _MY_ISSUES_PATH:
                 self._internal(path, "GET")
                 return
             if path == "/ci/artifact":
@@ -295,25 +312,32 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 self.server.artifact_streams.release()
 
         def do_DELETE(self) -> None:
-            if self.path.split("?")[0].rstrip("/") == "/internal/redmine-key":
-                self._internal("/internal/redmine-key", "DELETE")
+            path = self.path.split("?")[0].rstrip("/")
+            if path in _CREDENTIAL_PATHS:
+                self._internal(path, "DELETE")
                 return
             self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
 
         def _internal(self, path: str, method: str) -> None:
-            # Portal-facing internal API. Bearer-authenticated and strictly scoped to
+            # Credential-enrollment API. Bearer-authenticated and strictly scoped to
             # the token's own actor — the identity-propagation override is deliberately
             # NOT applied here, so a forged X-Forwarded-User cannot retarget the actor.
             api = self.server.internal_api
-            if api is None:
+            if api is None or not self.server.serves_internal:
+                # Not routed on this listener reads as absent, not as forbidden.
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            if method != "GET" and not is_origin_allowed(self.headers.get("Origin"), self.server.allowed_origins):
+                # These two are state-changing and reachable by a browser that holds
+                # the bearer; /mcp has had this check since 0.1.0 and they had not.
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden origin"})
                 return
             try:
                 principal = self.server.authenticator.authenticate_header(self.headers.get("Authorization"))
             except AuthError:
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                 return
-            if method == "GET" and path == "/internal/redmine-key":
+            if method == "GET" and path in _CREDENTIAL_PATHS:
                 status, payload = api.status(principal)
             elif method == "GET":
                 status, payload = api.my_issues(principal)
@@ -332,10 +356,10 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             self._send_json(status, payload)
 
         def do_POST(self) -> None:
-            if self.path.split("?")[0].rstrip("/") == "/internal/redmine-key":
-                self._internal("/internal/redmine-key", "POST")
+            if self.path.split("?")[0].rstrip("/") in _CREDENTIAL_PATHS:
+                self._internal(self.path.split("?")[0].rstrip("/"), "POST")
                 return
-            if self.path != "/mcp":
+            if self.path != "/mcp" or not self.server.serves_mcp:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
 
@@ -397,7 +421,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def _with_oidc(tokens: BearerTokenAuthenticator, settings: Settings):
+def _with_oidc(tokens: BearerTokenAuthenticator, settings: Settings) -> tuple[Any, "GrantsFile | None"]:
     """Wrap the token authenticator so OIDC answers what the token file does not.
 
     Fail-loud at boot: an unreachable IdP here means discovery failed, and a
@@ -407,20 +431,21 @@ def _with_oidc(tokens: BearerTokenAuthenticator, settings: Settings):
     rather than locking everyone out (oidc.JwksCache).
     """
     if not settings.oidc_enabled:
-        return tokens
+        return tokens, None
     jwks_url = settings.oidc_jwks_url or discover_jwks_url(settings.oidc_issuer)
+    grants = GrantsFile(settings.oidc_grants_file)
     oidc = OidcAuthenticator(
         issuer=settings.oidc_issuer,
         audience=settings.oidc_audience,
         jwks=JwksCache(jwks_url, ttl_sec=settings.oidc_jwks_ttl_sec),
-        grants=GrantsFile(settings.oidc_grants_file),
+        grants=grants,
         clock_skew_sec=settings.oidc_clock_skew_sec,
         groups_claim=settings.oidc_groups_claim,
         required_scope=settings.oidc_required_scope,
     )
     print(f"OIDC enabled: issuer={settings.oidc_issuer} audience={settings.oidc_audience} "
           f"jwks={jwks_url}", file=sys.stderr, flush=True)
-    return CompositeAuthenticator(tokens, oidc)
+    return CompositeAuthenticator(tokens, oidc), grants
 
 
 def build_server(settings: Settings) -> GatewayHTTPServer:
@@ -433,10 +458,13 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
         token_sources.append((settings.user_token_file, False))
     # A deployment whose identities all come from an IdP legitimately has no
     # opaque tokens; an empty authenticator refuses every bearer, which is what
-    # the OIDC path is then there to answer.
-    authenticator = BearerTokenAuthenticator.from_files(token_sources) if token_sources \
-        else BearerTokenAuthenticator({})
-    authenticator = _with_oidc(authenticator, settings)
+    # the OIDC path is then there to answer. The empty-store guard exists to
+    # catch a misconfigured token file, so it stays on for everyone else -- but
+    # with OIDC it would refuse to boot over a runtime store that is simply
+    # still empty, which is the normal state before the first token is minted.
+    authenticator = BearerTokenAuthenticator.from_files(token_sources, allow_empty=settings.oidc_enabled) \
+        if token_sources else BearerTokenAuthenticator({})
+    authenticator, oidc_grants = _with_oidc(authenticator, settings)
     actor_labels = ActorLabels(settings.user_token_file)
     memory_backend = HttpMemoryBackend(
         base_url=settings.memory_base_url,
@@ -544,6 +572,7 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
         prefix=settings.identity_header_prefix,
     )
     server.allowed_origins = settings.allowed_origins
+    server.oidc_grants = oidc_grants
     server.keystore = keystore
     # The internal API (portal key page / my-issues) now works for either backend:
     # both implement verify_key and list_assigned_to_me, and the keystore binds
@@ -559,6 +588,28 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
     return server
 
 
+def build_admin_server(settings: Settings, main_server: GatewayHTTPServer) -> GatewayHTTPServer:
+    """A second listener that serves ONLY the credential-enrollment routes.
+
+    It shares the main server's authenticator, keystore and audit sink rather than
+    building its own: two authenticators would be two hot-reload clocks, and a
+    revocation that took effect on one socket and not the other is the kind of
+    difference nobody notices until it matters.
+    """
+    admin = GatewayHTTPServer((settings.admin_host, settings.admin_port), make_handler())
+    admin.app = main_server.app
+    admin.authenticator = main_server.authenticator
+    admin.identity_verifier = main_server.identity_verifier
+    admin.allowed_origins = settings.allowed_origins
+    admin.keystore = main_server.keystore
+    admin.internal_api = main_server.internal_api
+    admin.audit_sink = main_server.audit_sink
+    admin.serves_mcp = False
+    admin.serves_internal = True
+    main_server.serves_internal = False   # exactly one listener answers them
+    return admin
+
+
 def main() -> None:
     settings = Settings.from_env()
     if not _is_loopback_host(settings.host):
@@ -570,6 +621,18 @@ def main() -> None:
             flush=True,
         )
     server = build_server(settings)
+    admin = None
+    if settings.admin_port:
+        admin = build_admin_server(settings, server)
+        if not _is_loopback_host(settings.admin_host):
+            print(
+                f"WARNING: the admin listener is bound to {settings.admin_host}, which is not "
+                "loopback. Credential enrollment must not be routed publicly.",
+                file=sys.stderr, flush=True,
+            )
+        threading.Thread(target=admin.serve_forever, name="admin-listener", daemon=True).start()
+        print(f"admin (credential enrollment) listening on {settings.admin_host}:{settings.admin_port}",
+              flush=True)
     print(f"mcp-governance-gateway listening on {settings.host}:{settings.port}", flush=True)
     try:
         server.serve_forever()
@@ -577,6 +640,9 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        if admin is not None:
+            admin.shutdown()
+            admin.server_close()
 
 
 if __name__ == "__main__":

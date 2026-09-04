@@ -110,7 +110,24 @@ def _print_entry(entry: dict[str, Any]) -> None:
           f"{entry.get('issue_project') or '-':<14} {roles}")
 
 
+def _required_value(name: str, value: str) -> str:
+    """Reject what `auth._required_str` would reject, HERE.
+
+    A store this tool writes must be one the gateway can load. `--actor "   "`
+    passed argparse's `required=True` happily and then made the whole file
+    unloadable on the next reload -- and `auth.py` keeps the last-good set on a
+    load failure, so the operator's next revocation would silently not take
+    effect either.
+    """
+    text = (value or "").strip()
+    if not text:
+        raise SystemExit(f"--{name} must not be blank")
+    return text
+
+
 def cmd_mint(args) -> int:
+    args.actor = _required_value("actor", args.actor)
+    args.project = _required_value("project", args.project)
     path = _resolve_store(args)
     entries = _load(path)
     if any(_match(e, args.actor, args.project) for e in entries):
@@ -135,6 +152,8 @@ def cmd_mint(args) -> int:
 
 
 def cmd_rotate(args) -> int:
+    args.actor = _required_value("actor", args.actor)
+    args.project = _required_value("project", args.project)
     path = _resolve_store(args)
     entries = _load(path)
     target = next((e for e in entries if _match(e, args.actor, args.project)), None)
@@ -150,6 +169,8 @@ def cmd_rotate(args) -> int:
 
 
 def cmd_revoke(args) -> int:
+    args.actor = _required_value("actor", args.actor)
+    args.project = _required_value("project", args.project)
     path = _resolve_store(args)
     entries = _load(path)
     keep = [e for e in entries if not _match(e, args.actor, args.project)]
@@ -175,6 +196,8 @@ def cmd_list(args) -> int:
 
 
 def cmd_role(args) -> int:
+    args.actor = _required_value("actor", args.actor)
+    args.project = _required_value("project", args.project)
     path = _resolve_store(args)
     entries = _load(path)
     target = next((e for e in entries if _match(e, args.actor, args.project)), None)

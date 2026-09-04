@@ -208,6 +208,19 @@ class ClaimTests(_OidcTestCase):
         with self.assertRaises(AuthError):
             self.auth.authenticate(self.idp.token(self.idp.claims(exp=int(time.time()) - 3600)))
 
+    def test_an_infinite_expiry_is_refused_rather_than_never_expiring(self):
+        # `json.loads("1e999")` is float('inf'), and `now > inf` is False -- so
+        # without a finiteness check this reads as a token that has not expired
+        # yet and never will. Same class as `NaN` reaching an int().
+        for value in (json.loads("1e999"), json.loads("-1e999"), json.loads("NaN")):
+            with self.assertRaises(AuthError, msg=repr(value)):
+                self.auth.authenticate(self.idp.token(self.idp.claims(exp=value)))
+
+    def test_an_infinite_nbf_or_iat_cannot_hold_a_token_open_either(self):
+        infinite = json.loads("-1e999")
+        principal = self.auth.authenticate(self.idp.token(self.idp.claims(nbf=infinite, iat=infinite)))
+        self.assertEqual(principal.actor, "user-1")   # ignored, not honoured as "always valid"
+
     def test_a_token_with_no_expiry_is_refused(self):
         claims = self.idp.claims()
         claims.pop("exp")
@@ -280,13 +293,32 @@ class GrantTests(_OidcTestCase):
             {"subjects": {"late": {"project": "team-late"}}}), encoding="utf-8")
         self.assertEqual(auth.authenticate(self.idp.token(self.idp.claims(sub="late"))).project, "team-late")
 
-    def test_a_corrupt_grants_file_keeps_the_last_good_mapping(self):
+    def test_a_corrupt_grants_file_keeps_the_last_good_mapping_and_says_it_is_stale(self):
+        # Last-good on an ALLOW-list is fail-OPEN: the revoked row is still live.
+        # Keeping it is still right (a typo must not lock everyone out) but it has
+        # to be visible somewhere other than stderr -- /healthz reads this flag.
         grants = GrantsFile(self.grants_path)
         auth = OidcAuthenticator(ISSUER, AUDIENCE, self.cache, grants)
         self.assertEqual(auth.authenticate(self.idp.token()).project, "team-a")
+        self.assertFalse(grants.stale)
         time.sleep(0.01)
         Path(self.grants_path).write_text("{ not json", encoding="utf-8")
         self.assertEqual(auth.authenticate(self.idp.token()).project, "team-a")
+        self.assertTrue(grants.stale)
+
+    def test_a_repaired_grants_file_is_picked_up_without_waiting_for_another_edit(self):
+        # A failed parse must NOT be recorded as the version seen, or a botched
+        # offboarding edit stays fail-open until someone touches the file again.
+        grants = GrantsFile(self.grants_path)
+        auth = OidcAuthenticator(ISSUER, AUDIENCE, self.cache, grants)
+        time.sleep(0.01)
+        Path(self.grants_path).write_text("{ not json", encoding="utf-8")
+        self.assertEqual(auth.authenticate(self.idp.token()).project, "team-a")
+        self.assertTrue(grants.stale)
+        Path(self.grants_path).write_text(json.dumps(
+            {"subjects": {"user-1": {"project": "repaired"}}}), encoding="utf-8")
+        self.assertEqual(auth.authenticate(self.idp.token()).project, "repaired")
+        self.assertFalse(grants.stale)
 
     def test_a_grants_file_that_is_absent_at_startup_is_a_boot_failure(self):
         with self.assertRaises(Exception):
@@ -378,6 +410,26 @@ class MalformedTokenTests(_OidcTestCase):
         with self.assertRaises(AuthError):
             self.auth.authenticate("a." + "x" * 20_000 + ".c")
 
+    def test_a_non_ascii_segment_is_an_autherror_not_a_unicode_crash(self):
+        # The signing input is built with .encode("ascii"), which raises
+        # UnicodeEncodeError on a non-ASCII segment -- not an AuthError, so a 500
+        # instead of a 401, which tells a caller their input reached the parser.
+        # http.server decodes headers as latin-1, so this is reachable from the wire.
+        head = _b64(json.dumps({"alg": "RS256", "kid": "r1"}).encode())
+        for token in (f"{head}.é.AA", f"é.{head}.AA", f"{head}.AA.é", "ü.ü.ü"):
+            with self.assertRaises(AuthError, msg=token):
+                self.auth.authenticate(token)
+
+    def test_an_ecdsa_signature_of_zeroes_is_refused_on_any_cryptography_version(self):
+        # r or s of zero is not a valid ECDSA signature. Older `cryptography`
+        # encodes (0, 0) happily and lets verify fail; newer versions raise
+        # ValueError from encode_dss_signature, which is not an AuthError.
+        head = _b64(json.dumps({"alg": "ES256", "kid": "e1"}).encode())
+        payload = _b64(json.dumps(self.idp.claims()).encode())
+        for signature in (bytes(64), bytes(32) + b"\x01" * 32, b"\x01" * 32 + bytes(32)):
+            with self.assertRaises(AuthError):
+                self.auth.authenticate(f"{head}.{payload}.{_b64(signature)}")
+
     def test_the_padded_spelling_of_a_segment_is_not_accepted(self):
         # base64url in a JWS is unpadded. A decoder that accepts several spellings
         # is a decoder two implementations can disagree about.
@@ -385,6 +437,37 @@ class MalformedTokenTests(_OidcTestCase):
         head, payload, signature = token.split(".")
         with self.assertRaises(AuthError):
             self.auth.authenticate(f"{head}=.{payload}.{signature}")
+
+
+class EmptyStoreBootTests(unittest.TestCase):
+    """An OIDC deployment that also names a runtime token store must boot.
+
+    The empty-merge guard catches a misconfigured token file, which is the right
+    default. It is wrong when identities come from an IdP and the runtime store
+    is simply still empty -- the normal state before the first token is minted.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / "user-tokens.json"
+        self.path.write_text(json.dumps({"tokens": []}), encoding="utf-8")
+
+    def test_an_empty_optional_store_still_refuses_to_boot_by_default(self):
+        with self.assertRaises(ValueError):
+            BearerTokenAuthenticator.from_files([(self.path, False)])
+
+    def test_an_empty_optional_store_is_allowed_when_identities_come_from_elsewhere(self):
+        auth = BearerTokenAuthenticator.from_files([(self.path, False)], allow_empty=True)
+        with self.assertRaises(AuthError):
+            auth.authenticate_header("Bearer anything")   # empty, so it refuses everyone
+
+    def test_a_token_minted_into_it_later_takes_effect_without_a_restart(self):
+        auth = BearerTokenAuthenticator.from_files([(self.path, False)], allow_empty=True)
+        time.sleep(0.01)
+        self.path.write_text(json.dumps(
+            {"tokens": [{"token": "t", "actor": "1", "project": "p", "roles": []}]}), encoding="utf-8")
+        self.assertEqual(auth.authenticate_header("Bearer t").actor, "1")
 
 
 class CompositeTests(_OidcTestCase):

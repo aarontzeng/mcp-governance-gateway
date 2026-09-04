@@ -23,9 +23,11 @@ All notable changes to this project are recorded here. The format follows
 - **`mcpgw-admin`** — a reference minter for deployments without an identity
   provider, satisfying what ADR-0007 asks of one: tokens from `secrets`, and an
   atomic `mkstemp` + `fchmod 0600` + `fsync` + `os.replace` write. Subcommands
-  `mint`, `rotate`, `revoke`, `list`, `grant`, `revoke-role`. It writes only
-  `GATEWAY_USER_TOKEN_FILE` and refuses to rewrite the operator-managed
-  `GATEWAY_TOKEN_FILE`; `--actor` is never defaulted; the token is printed once
+  `mint`, `rotate`, `revoke`, `list`, `grant`, `revoke-role`. It writes whatever
+  `--store` names, defaulting to `GATEWAY_USER_TOKEN_FILE`, and refuses when that
+  resolves to the same file as `GATEWAY_TOKEN_FILE` — a guard against the obvious
+  slip rather than a boundary, since it can only compare what is in the *admin*
+  shell's environment; `--actor` is never defaulted; the token is printed once
   and `list` shows `token_id` instead. It is not a portal — what a self-service
   credential page looks like remains a deployment's own question.
 

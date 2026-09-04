@@ -90,6 +90,38 @@ class MintTests(_CliTestCase):
         self.assertFalse(self.store.exists())
 
 
+class StoreLoadabilityTests(_CliTestCase):
+    """What this tool writes must be a store the gateway can load.
+
+    `auth.py` keeps the last-good token set when a load fails, so a store this
+    tool corrupted would ALSO silently swallow the operator's next revocation.
+    """
+
+    def test_a_blank_actor_or_project_is_refused_before_anything_is_written(self):
+        for argv in (["mint", "--actor", "   ", "--project", "p"],
+                     ["mint", "--actor", "1", "--project", "  "],
+                     ["mint", "--actor", "\t", "--project", "\n"]):
+            with self.assertRaises(SystemExit) as caught:
+                main(["--store", str(self.store), *argv])
+            self.assertIn("must not be blank", str(caught.exception))
+        self.assertFalse(self.store.exists())
+
+    def test_surrounding_whitespace_is_trimmed_rather_than_stored(self):
+        self.run_cli("mint", "--actor", " 10000001 ", "--project", " team-a ")
+        entry = self.entries()[0]
+        self.assertEqual((entry["actor"], entry["project"]), ("10000001", "team-a"))
+        BearerTokenAuthenticator.from_file(self.store)   # loads without raising
+
+    def test_a_blank_actor_is_refused_by_every_subcommand_that_writes(self):
+        self.run_cli("mint", "--actor", "1", "--project", "p")
+        for argv in (["rotate", "--actor", " ", "--project", "p"],
+                     ["revoke", "--actor", " ", "--project", "p"],
+                     ["grant", "--actor", " ", "--project", "p", "--role", "r"]):
+            with self.assertRaises(SystemExit):
+                main(["--store", str(self.store), *argv])
+        self.assertEqual(len(self.entries()), 1)
+
+
 class RotateAndRevokeTests(_CliTestCase):
     def setUp(self):
         super().setUp()

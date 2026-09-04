@@ -72,6 +72,72 @@ because there are no claims in the string to validate. If you need
 audience-binding or expiry, that belongs in whatever mints the tokens, and
 plausibly in an OIDC front gateway rather than in this file.
 
+## Credential Enrollment
+
+A caller may enroll a **personal downstream credential** (a Redmine API key, a
+GitLab PAT) so that writes go out under their own identity rather than under the
+gateway's shared service account. The gateway exposes the API a page would call;
+it does not ship the page (ADR-0007, and `docs/roadmap.md`).
+
+| Route | Method | Does |
+|---|---|---|
+| `/internal/credentials` (alias: `/internal/redmine-key`) | GET | enrollment status for the bearer's own actor |
+| | POST `{"key": "..."}` | verify the credential downstream, then store it encrypted |
+| | DELETE | remove it |
+| `/internal/my-issues` | GET | the caller's own open issues, using their enrolled credential |
+
+### The contract
+
+**This surface must not be routed publicly.** Set `ADMIN_PORT` (and, if
+you must, `ADMIN_HOST` — it defaults to loopback) and it moves to its own
+socket; the MCP listener then answers `404` for these paths, so an ingress that
+publishes `/mcp` cannot publish enrollment with it. Leave `ADMIN_PORT` unset and
+they stay on the MCP listener, which is the 0.1.0 behaviour and is only safe if
+your ingress refuses `/internal/*` itself.
+
+**It acts on the bearer's own actor and nothing else.** There is no "enroll for
+user X" parameter, and the signed identity headers of ADR-0004 are deliberately
+**not** applied here — a forged `X-Forwarded-User` can change who a `/mcp` call
+is attributed to, and it must not be able to change whose credential is written.
+
+**A credential is bound to the actor and the backend** by AES-GCM associated
+data, so a stored record cannot be replayed as another person's or another
+backend's even by someone who can edit the store file.
+
+**Enrollment is gated on an email match.** The submitted credential is used to
+ask the downstream tracker who it belongs to, and that account's email must
+equal the `email` on the caller's gateway token. Two consequences an operator
+must plan for:
+
+- **A token minted without an `email` can never enroll.** The comparison needs
+  both sides; the gateway refuses rather than guessing. Mint tokens with the
+  address the tracker knows (`mcpgw-admin mint --email ...`), or expect every
+  enrollment to fail with `identity_mismatch`.
+- **When someone's email changes**, their existing stored credential keeps
+  working — the record is keyed on the actor, which does not change — but they
+  cannot *re-enroll* until the gateway token carries the new address. Update the
+  token (`mcpgw-admin` writes the runtime store; a static entry is an edit) and
+  the tracker account together. This is the one place email is load-bearing
+  rather than a label, and it is a deliberate trade: an address is the only
+  thing both systems can be asked about.
+
+### Offboarding
+
+In this order, so no window leaves a live credential without a live audit trail:
+
+1. `DELETE /internal/credentials` as that user, **or** clear their record from
+   the credential store — the encrypted key is the thing that still works after
+   their gateway token is gone.
+2. Revoke the gateway token: `mcpgw-admin revoke --actor <id> --project <p>`, or
+   remove the entry from the static store. The gateway reloads on file change;
+   a corrupt file keeps the last-good set and says so on stderr, so **confirm
+   the revocation took effect** rather than assuming it.
+3. With OIDC, remove the subject (or their group) from `OIDC_GRANTS_FILE` as
+   well. Removing them at the IdP is necessary but not sufficient if a valid
+   token is already in flight: it stays valid until it expires.
+4. Their audit history stays. It names an actor id, not a person, and it is the
+   record of what the gateway decided.
+
 ## Memory Capacity Controls
 
 Infrastructure monitoring and gateway policy serve different purposes:

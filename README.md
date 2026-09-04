@@ -54,7 +54,8 @@ tenancy still comes from a grants file this deployment owns — an IdP knows who
 someone is, not which project of this gateway they may act in. The token string is still a
 secret — whoever holds it acts as that principal — but it encodes nothing, so
 the claims live on the server and renaming or re-scoping them needs no token
-re-mint. Writes additionally require a writer role
+re-mint. (An OIDC access token does carry claims; the gateway reads identity
+from them and takes tenancy from its own grants file regardless.) Writes additionally require a writer role
 (default-deny). Optional per-user credentials (a personal Redmine key or GitLab
 PAT) are held in an encrypted-at-rest keystore (AES-256-GCM) with the ciphertext
 bound to the owner and backend, so a credential cannot be replayed as another

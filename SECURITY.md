@@ -93,6 +93,19 @@ a credential-shaped unbroken blob (a PEM key, a well-known token prefix, a JWT, 
 patterns do not know, pass by design; the scanner is a guardrail against the
 accidental paste, not a data-loss-prevention boundary.
 
+**A confirmation is bound to the identity, not to the credential, for OIDC
+callers.** `confirm.py` binds a pending write to `actor | project | token_id |
+issue_project | tool`. For an opaque token `token_id` is a hash of the token
+string, so a confirmation can only be committed by the credential that prepared
+it. For an OIDC caller it is derived from `iss|sub` — deliberately, so a token
+refresh does not expire a pending confirmation mid-flow (ADR-0016) — and it
+therefore adds nothing beyond `actor`. A second session of the same person can
+commit a confirmation the first prepared, given identical arguments. That session
+already had the authority to prepare the same write itself, so this is not an
+escalation; what it means is that a leaked `confirmationId` is a *user*-level
+capability for its 300-second life rather than a credential-level one. Treat a
+confirmation id as you would the write it authorizes.
+
 **One active instance.** Confirmation state, quotas, docs snapshots and the audit
 stream are process-local, and the credential store is guarded by an in-process
 lock only. Two instances behind a load balancer are two enforcement points, not
