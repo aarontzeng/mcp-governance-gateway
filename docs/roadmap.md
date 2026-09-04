@@ -67,9 +67,10 @@ the filter `mem::search` does apply fails open for sessions evicted since
 indexing, by construction rather than by chance, so today's keyword path is not
 the clean baseline the smart-search comparison assumed either. Whatever is done
 about semantic retrieval, the tenancy question has to be answered for the
-keyword path too — and the first thing to establish is the backend's session
-retention policy, since the exposure grows with the fraction of a corpus that
-has outlived it.
+keyword path too — and the retention policy behind it is now
+recorded there: nothing evicts on a schedule, so the exposure is zero until an
+operator invokes eviction, and the rows that then outlive their session are
+preferentially the important ones.
 
 ## CI: parameterised triggers
 

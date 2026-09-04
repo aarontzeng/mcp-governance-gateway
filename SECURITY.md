@@ -82,11 +82,31 @@ So a hit whose session has been evicted since indexing reaches the caller
 whatever project was asked for, and the gateway cannot detect it because the
 hits carry no project field for it to re-check.
 
-The operational consequence is the part to plan around: the exposure is
-proportional to how much of the corpus has outlived the backend's session
-retention, so it grows over time in a long-lived deployment rather than being
-a fixed risk. Treat `memory.search` results as scoped by a filter that is
-best-effort at the backend, not as a tenant boundary this gateway enforces. `memory.action_update_status` checks the target's project
+The operational shape, read from `src/functions/evict.ts` at the same commit,
+is the part to plan around — and it is not a clock:
+
+- **Nothing evicts on a schedule.** `mem::evict` has no cron and no timer; its
+  only caller is an HTTP route. A deployment that never invokes it never
+  orphans a row, and this limitation never fires.
+- Once invoked, it deletes a **session** whose `startedAt` is older than
+  `staleSessionDays` (default 30) and which has no summary. Note `startedAt`,
+  not last activity: a long-running session is stale by age, not by idleness.
+- It deletes an **observation** under different criteria entirely — importance
+  below `lowImportanceThreshold` (default 3) *and* older than
+  `lowImportanceMaxDays` (default 90).
+
+Those two policies disagree, and the gap is the exposure: a row survives its
+session when it is younger than 90 days **or** important enough to keep. So the
+orphaned, unscoped rows are preferentially the ones marked as mattering most.
+That follows from the two thresholds rather than from anything observed at
+runtime, and it is the reason to treat this as a boundary to check rather than
+a corner case.
+
+If you need a number for a specific deployment, the eviction route accepts a
+dry run and reports the stale-session count without deleting anything.
+
+Treat `memory.search` results as scoped by a filter that is best-effort at the
+backend, not as a tenant boundary this gateway enforces. `memory.action_update_status` checks the target's project
 by listing first and then updates by id, so a record re-homed between the two
 calls is updated on its new project.
 
