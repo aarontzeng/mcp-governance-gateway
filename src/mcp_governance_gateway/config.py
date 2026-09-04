@@ -99,6 +99,10 @@ class Settings:
     # (e.g. https://host/adapter). Unset -> ci.artifact returns a relative
     # "/ci/artifact?..." reference the caller prepends its own origin to.
     ci_artifact_base_url: str | None = None
+    # A SECOND jobs allowlist, for ci.rerun. Unset -> no project may start any
+    # build, which is the right default for a tool that spends CI capacity: the
+    # set of jobs an agent may watch is not the set it may start.
+    ci_trigger_jobs_file: str | None = None
 
     @property
     def oidc_enabled(self) -> bool:
@@ -175,6 +179,7 @@ class Settings:
             jenkins_timeout_sec=_timeout_env("JENKINS_TIMEOUT_SEC"),
             ci_jobs_file=os.environ.get("CI_JOBS_FILE") or None,
             ci_artifact_base_url=os.environ.get("CI_ARTIFACT_BASE_URL") or None,
+            ci_trigger_jobs_file=os.environ.get("CI_TRIGGER_JOBS_FILE") or None,
             ci_artifact_max_bytes=_int_env("CI_ARTIFACT_MAX_BYTES", 256 * 1024 * 1024, minimum=1),
             ci_artifact_max_concurrent=_int_env("CI_ARTIFACT_MAX_CONCURRENT", 4, minimum=1),
         )

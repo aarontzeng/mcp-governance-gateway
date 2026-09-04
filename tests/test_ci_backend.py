@@ -19,10 +19,22 @@ LAST_BUILD = {"number": 128, "result": "FAILURE", "building": False, "timestamp"
 
 
 class FakeJenkins(JenkinsHttpBackend):
-    def __init__(self, jobs=None, replies=None):
-        super().__init__("https://jenkins.example", "svc", "TOKEN", jobs or {"proj-a": ["swarm-build", "swarm-lint"]})
+    def __init__(self, jobs=None, replies=None, trigger_jobs=None):
+        super().__init__("https://jenkins.example", "svc", "TOKEN",
+                         jobs or {"proj-a": ["swarm-build", "swarm-lint"]},
+                         trigger_jobs_by_project=trigger_jobs)
         self.paths: list[str] = []
+        self.posts: list[str] = []
         self.replies = replies or {}
+
+    _NO_POST_REPLY = object()   # so a configured `None` is not "not configured"
+
+    def _post(self, path: str) -> str | None:
+        self.posts.append(path)
+        reply = self.replies.get("POST", self._NO_POST_REPLY)
+        if isinstance(reply, CiBackendError):
+            raise reply
+        return "https://jenkins.example/queue/item/7/" if reply is self._NO_POST_REPLY else reply
 
     def _fetch(self, path: str) -> bytes:
         self.paths.append(path)
@@ -570,6 +582,135 @@ class LogMetadataTests(unittest.TestCase):
         self.assertEqual(out["lines"], ["line 500"])   # the console tail is untouched
 
 
+class RerunTests(unittest.TestCase):
+    """ci.rerun over a fake Jenkins.
+
+    The reply shapes are the ones a real Jenkins 2.531 gave: 201 with a
+    `Location` naming a QUEUE ITEM, no build number, and two triggers inside the
+    quiet period handed back the SAME item.
+    """
+
+    def _fake(self, trigger=("swarm-build",), jobs=None, replies=None):
+        return FakeJenkins(jobs=jobs, replies=replies,
+                           trigger_jobs={"proj-a": list(trigger)} if trigger is not None else None)
+
+    def test_a_rerun_returns_the_queue_item_not_a_build(self):
+        # The build number does not exist yet: Jenkins holds the request in the
+        # quiet period first. Claiming a build here would be inventing one.
+        fake = self._fake()
+        out = fake.rerun("swarm-build", _ctx())
+        self.assertEqual(out["job"], "swarm-build")
+        self.assertEqual(out["queueItem"], 7)
+        self.assertNotIn("build", out)
+        self.assertEqual(fake.posts, ["/job/swarm-build/build"])
+
+    def test_a_coalesced_rerun_says_so_rather_than_claiming_a_new_build(self):
+        # Measured against 2.531: two triggers inside the quiet period return the
+        # same queue item and produce ONE build. Reporting the second as a fresh
+        # start would be a lie an agent would then wait on.
+        import json as _json
+        fake = self._fake(replies={"/queue/api/json": _json.dumps({"items": [{"id": 7}]}).encode()})
+        self.assertTrue(fake.rerun("swarm-build", _ctx())["alreadyQueued"])
+
+    def test_a_queue_read_that_fails_costs_the_hint_not_the_trigger(self):
+        fake = self._fake(replies={"/queue/api/json": CiBackendError("CI HTTP 500", status=500)})
+        out = fake.rerun("swarm-build", _ctx())
+        self.assertEqual(out["queueItem"], 7)
+        self.assertFalse(out["alreadyQueued"])
+
+    def test_a_location_that_cannot_be_parsed_is_a_missing_hint_not_an_error(self):
+        for location in (None, "", "https://jenkins.example/queue/", "not a url"):
+            out = self._fake(replies={"POST": location}).rerun("swarm-build", _ctx())
+            self.assertIsNone(out["queueItem"], location)
+
+    def test_the_trigger_allowlist_is_not_the_read_allowlist(self):
+        # swarm-lint is watchable and must not be startable. The refusal is the
+        # same 404 a job in another project gets: no oracle over what exists.
+        fake = self._fake(trigger=("swarm-build",))
+        with self.assertRaises(CiBackendError) as watchable:
+            fake.rerun("swarm-lint", _ctx())
+        with self.assertRaises(CiBackendError) as foreign:
+            fake.rerun("no-such-job", _ctx())
+        self.assertEqual(str(watchable.exception), str(foreign.exception))
+        self.assertEqual(watchable.exception.status, 404)
+        self.assertEqual(fake.posts, [])   # refused before anything reached Jenkins
+
+    def test_no_trigger_allowlist_means_nobody_can_start_anything(self):
+        # The default for a tool that spends CI capacity is "no".
+        fake = self._fake(trigger=None)
+        with self.assertRaises(CiBackendError) as caught:
+            fake.rerun("swarm-build", _ctx())
+        self.assertEqual(caught.exception.status, 404)
+        self.assertEqual(fake.posts, [])
+
+    def test_another_project_cannot_start_this_project_s_jobs(self):
+        with self.assertRaises(CiBackendError):
+            self._fake().rerun("swarm-build", _ctx(project="proj-b"))
+
+    def test_a_403_names_the_credential_problem_it_almost_always_is(self):
+        # Jenkins refuses a password POST without a session-bound crumb, and
+        # exempts API tokens. A bare "CI HTTP 403" would send an operator looking
+        # for a permissions problem they do not have.
+        #
+        # Driven through the REAL _post with urlopen patched, because the message
+        # lives there; the recording fake would only prove the fake.
+        import urllib.error
+        from unittest import mock
+        real = JenkinsHttpBackend("https://jenkins.example", "svc", "TOKEN",
+                                  {"proj-a": ["swarm-build"]},
+                                  trigger_jobs_by_project={"proj-a": ["swarm-build"]})
+        error_403 = urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+        with mock.patch("mcp_governance_gateway.ci_backend.request.urlopen", side_effect=error_403):
+            with self.assertRaises(CiBackendError) as caught:
+                real.rerun("swarm-build", _ctx())
+        self.assertIn("API token", str(caught.exception))
+        self.assertEqual(caught.exception.status, 403)
+
+    def test_the_real_post_returns_the_location_header_and_sends_no_body(self):
+        from unittest import mock
+        real = JenkinsHttpBackend("https://jenkins.example", "svc", "TOKEN",
+                                  {"proj-a": ["swarm-build"]},
+                                  trigger_jobs_by_project={"proj-a": ["swarm-build"]})
+        captured = {}
+
+        class _Response:
+            headers = {"Location": "https://jenkins.example/queue/item/11/"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, *a):
+                return b"{}"
+
+        def fake_urlopen(req, timeout=None):
+            captured["method"] = req.get_method()
+            captured["data"] = req.data
+            captured["url"] = req.full_url
+            return _Response()
+
+        with mock.patch("mcp_governance_gateway.ci_backend.request.urlopen", side_effect=fake_urlopen):
+            out = real.rerun("swarm-build", _ctx())
+        self.assertEqual(out["queueItem"], 11)
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["data"], b"")     # no parameters: this re-runs as configured
+        self.assertTrue(captured["url"].endswith("/job/swarm-build/build"))
+
+    def test_the_job_name_is_url_quoted_into_the_path(self):
+        fake = self._fake(trigger=("needs quoting",), jobs={"proj-a": ["needs quoting"]})
+        fake.rerun("needs quoting", _ctx())
+        self.assertEqual(fake.posts, ["/job/needs%20quoting/build"])
+
+    def test_has_trigger_project_is_separate_from_has_project(self):
+        fake = self._fake(trigger=("swarm-build",))
+        self.assertTrue(fake.has_project("proj-a"))
+        self.assertTrue(fake.has_trigger_project("proj-a"))
+        self.assertFalse(self._fake(trigger=None).has_trigger_project("proj-a"))
+        self.assertTrue(self._fake(trigger=None).has_project("proj-a"))
+
+
 class GatewayCiTests(unittest.TestCase):
     def setUp(self):
         self.audit = _ListAudit()
@@ -628,6 +769,52 @@ class GatewayCiTests(unittest.TestCase):
         self.assertIn("ci.builds", {t["name"] for t in la["result"]["tools"]})
         self.assertNotIn("ci.builds", {t["name"] for t in lb["result"]["tools"]})
         self.assertTrue(self._call(self.pb, "ci.builds", {"job": "swarm-build"})["result"].get("isError"))
+
+    def test_rerun_needs_the_role_and_is_confirmation_gated(self):
+        app = GatewayApp(memory_backend=_NullMemory(), audit_sink=self.audit,
+                         ci_backend=FakeJenkins(trigger_jobs={"proj-a": ["swarm-build"]}))
+        runner = Principal(actor="3", project="proj-a", roles=("ci_runner",), token_id="t3")
+
+        # Without the role the tool is denied by POLICY, which is a JSON-RPC error
+        # rather than a tool result -- the same shape an issue write gets -- and
+        # nothing reaches Jenkins.
+        denied = app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                 "params": {"name": "ci.rerun", "arguments": {"job": "swarm-build"}}}, self.pa)
+        self.assertEqual(denied["error"]["code"], -32003)
+        self.assertIn("ci run role", denied["error"]["message"])
+        self.assertEqual(self.audit.events[-1].outcome, "denied")
+        self.assertEqual(app._ci_backend.posts, [])
+
+        # With the role, the FIRST call must not start anything: it asks to confirm.
+        first = app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": "ci.rerun", "arguments": {"job": "swarm-build"}}}, runner)
+        pending = first["result"]["structuredContent"]
+        self.assertTrue(pending["confirmationRequired"])
+        self.assertEqual(app._ci_backend.posts, [], "a build was started before the confirmation")
+        self.assertEqual(self.audit.events[-1].outcome, "confirm_required")
+
+        # The second call, carrying the id, is the one that spends CI capacity.
+        second = app.handle_rpc(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "ci.rerun",
+                        "arguments": {"job": "swarm-build", "confirm": pending["confirmationId"]}}}, runner)
+        self.assertEqual(second["result"]["structuredContent"]["queueItem"], 7)
+        self.assertEqual(app._ci_backend.posts, ["/job/swarm-build/build"])
+        self.assertEqual(self.audit.events[-1].outcome, "ok")
+
+    def test_rerun_is_offered_only_to_a_runner_on_a_project_with_a_trigger_list(self):
+        with_trigger = GatewayApp(memory_backend=_NullMemory(), audit_sink=self.audit,
+                                  ci_backend=FakeJenkins(trigger_jobs={"proj-a": ["swarm-build"]}))
+        runner = Principal(actor="3", project="proj-a", roles=("ci_runner",), token_id="t3")
+
+        def names(app, principal):
+            listed = app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, principal)
+            return {t["name"] for t in listed["result"]["tools"]}
+
+        self.assertIn("ci.rerun", names(with_trigger, runner))
+        self.assertNotIn("ci.rerun", names(with_trigger, self.pa))          # no role
+        self.assertNotIn("ci.rerun", names(self.app, runner))               # no trigger list
+        self.assertIn("ci.status", names(self.app, runner))                 # reads unaffected
 
     def test_other_project_gets_clean_error_not_data(self):
         resp = self._call(self.pb, "ci.log", {"job": "swarm-build"})

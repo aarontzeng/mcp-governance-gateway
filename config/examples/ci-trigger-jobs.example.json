@@ -1,0 +1,11 @@
+{
+  "_comment": [
+    "Jobs each project may START with ci.rerun. Deliberately a DIFFERENT file",
+    "from CI_JOBS_FILE: the set an agent may watch is not the set it may spend",
+    "build capacity on. A job absent here is refused with the same 404 a job in",
+    "another project gets -- no oracle over what exists.",
+    "ci.rerun additionally needs the `ci_runner` role on the caller's token, and",
+    "is confirmation-gated."
+  ],
+  "demo-project": ["demo-tests"]
+}

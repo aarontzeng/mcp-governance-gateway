@@ -18,8 +18,9 @@
 
 ## Authorization as implemented
 
-The token's `roles` gate exactly one thing today: issue **writes** require
-`issue_writer`. Everything else is tenancy, not role:
+The token's `roles` gate two things: issue **writes** require `issue_writer`,
+and starting a CI build requires `ci_runner`. Everything else is tenancy, not
+role:
 
 | Tools | Requires | Confirmation |
 |---|---|---|
@@ -27,7 +28,8 @@ The token's `roles` gate exactly one thing today: issue **writes** require
 | `issues.get` / `search` / `mine` / `categories` | an `issue_project` claim | No |
 | `issues.create` / `add_note` / `update_status` | `issue_project` + `issue_writer` role | Yes |
 | `docs.*` (read-only) | a docs corpus configured for the project | No |
-| `ci.*` (read-only) | the project present in the CI job allowlist | No |
+| `ci.status` / `ci.builds` / `ci.log` / `ci.artifact` | the project present in `CI_JOBS_FILE` | No |
+| `ci.rerun` | the job present in `CI_TRIGGER_JOBS_FILE` **and** the `ci_runner` role | Yes |
 | any tool whose name ends in delete/destroy/purge/remove | — | Denied outright |
 
 The consequence worth stating out loud: **a token with a project can append to

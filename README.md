@@ -38,7 +38,7 @@ configuration — run only the ones you need.
 | Team memory | `memory.search` / `save` / `list`, `memory.lesson_*`, `memory.action_*` | [agentmemory](https://github.com/rohitg00/agentmemory) (Apache-2.0) |
 | Issue tracker | `issues.get` / `search` / `mine` / `categories` / `create` / `add_note` / `update_status` | Redmine **or** GitLab (per deployment) |
 | Docs corpus | `docs.search` / `get` / `list` | per-project Git repositories, indexed with a built-in BM25 (CJK-aware) |
-| CI | `ci.status` / `ci.builds` / `ci.log` / `ci.artifact` | Jenkins (read-only) |
+| CI | `ci.status` / `ci.builds` / `ci.log` / `ci.artifact`, plus `ci.rerun` | Jenkins (reads, and a gated build trigger) |
 
 Each backend enforces the same tenancy discipline: operations are scoped to the
 token's project, results are re-filtered wherever the backend returns the tenant

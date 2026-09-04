@@ -1,4 +1,5 @@
-"""Jenkins CI backend: read-only `ci.status` / `ci.builds` / `ci.log` / `ci.artifact`.
+"""Jenkins CI backend: `ci.status` / `ci.builds` / `ci.log` / `ci.artifact` (read)
+and `ci.rerun` (a write, behind its own allowlist, role and confirmation gate).
 
 Tenancy: Jenkins jobs carry no project concept, so the boundary is a
 server-side map `project -> [job names]` (like the docs corpus's repo map).
@@ -6,8 +7,9 @@ A token only sees and reads its project's allowlisted jobs; asking for any
 other job returns the same "unknown job" error whether it exists or not —
 no existence oracle over the Jenkins instance.
 
-Read-only by design: `ci.rerun` (a write) is a separate roadmap item and will
-need the confirmation gate; nothing here mutates Jenkins.
+Everything but `ci.rerun` is read-only. `ci.rerun` consumes build resources, so it
+sits behind a SECOND allowlist -- the set of jobs an agent may start is not the set
+it may watch -- a dedicated role, and the confirmation gate.
 
 Log tails are size-capped: console output can embed anything the build
 printed, so we return at most the last N lines of a bounded fetch and never
@@ -153,6 +155,15 @@ _NEVER_BUILT = {"build": None, "result": "UNKNOWN", "building": False,
                 "timestamp": None, "startedAt": None, "durationMs": None}
 
 
+def _queue_id_from(location: str | None) -> int | None:
+    """The trailing id of `.../queue/item/<n>/`. A Location we cannot parse is a
+    missing hint, not an error: the build was still queued."""
+    if not location:
+        return None
+    tail = [part for part in location.rstrip("/").split("/") if part]
+    return int(tail[-1]) if tail and tail[-1].isdigit() else None
+
+
 def _safe_build_ref(build: object) -> str:
     """A build ref safe to splice into a Jenkins URL path: a positive int or a known
     alias. Anything else is rejected — this value lands in a path segment, so it must
@@ -184,6 +195,16 @@ def load_ci_jobs(path: str) -> dict[str, list[str]]:
     return jobs
 
 
+def load_ci_trigger_jobs(path: str) -> dict[str, list[str]]:
+    """Same shape as `load_ci_jobs`, deliberately a separate FILE.
+
+    Sharing the file would make "may watch" and "may start" one decision; keeping
+    them apart is what lets an operator grant a project a wide read allowlist and
+    a narrow trigger one, which is the normal case.
+    """
+    return load_ci_jobs(path)
+
+
 class JenkinsHttpBackend:
     def __init__(
         self,
@@ -193,6 +214,7 @@ class JenkinsHttpBackend:
         jobs_by_project: dict[str, list[str]],
         timeout_sec: float = 10,
         artifact_base_url: str | None = None,
+        trigger_jobs_by_project: dict[str, list[str]] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._auth = None
@@ -203,9 +225,17 @@ class JenkinsHttpBackend:
         # Public base for the download endpoint ci.artifact hands back. Unset leaves a
         # relative reference the caller prepends its own origin to.
         self._artifact_base = (artifact_base_url or "").rstrip("/")
+        # A SEPARATE allowlist, deliberately not defaulting to the read one: the
+        # jobs an agent may watch and the jobs it may spend build capacity on are
+        # different questions, and answering them with one list means every job an
+        # agent can see is a job it can start. Empty -> ci.rerun exists for nobody.
+        self._trigger_jobs = trigger_jobs_by_project or {}
 
     def has_project(self, project: str | None) -> bool:
         return bool(project) and bool(self._jobs.get(project))
+
+    def has_trigger_project(self, project: str | None) -> bool:
+        return bool(project) and bool(self._trigger_jobs.get(project))
 
     # --- tools ---------------------------------------------------------
 
@@ -278,6 +308,37 @@ class JenkinsHttpBackend:
         rows = _listed_builds(data, limit)
         return {"job": name, "builds": rows, "count": len(rows)}
 
+    def rerun(self, job: str, context: RequestContext) -> dict[str, Any]:
+        """Start a build of one job from the TRIGGER allowlist.
+
+        What it returns is a queue item, not a build, and that is the honest
+        answer rather than a limitation to paper over. Jenkins answers a trigger
+        with 201 and a `Location` naming a queue item; the build number does not
+        exist until the quiet period elapses and an executor picks it up
+        (measured against 2.531: `queue/item/<id>` carries `executable: null`
+        with a human `why` such as "In the quiet period", and only later gains
+        `{number, url}`). An agent that wants the build polls `ci.builds`.
+
+        It also cannot promise it started a build AT ALL. Two triggers inside the
+        quiet period COALESCE into the same queue item -- measured: six triggers
+        produced three builds -- so "queued" is the strongest true statement, and
+        `alreadyQueued` says when Jenkins handed back an item it had already.
+
+        Deliberately parameterless: this re-runs the job as configured. A
+        parameterised trigger takes caller-supplied values into a build, which is
+        a different trust surface and stays out (`docs/roadmap.md`).
+        """
+        name = self._require_triggerable(job, context)
+        before = self._queue_ids()
+        location = self._post(f"/job/{parse.quote(name, safe='')}/build")
+        queue_id = _queue_id_from(location)
+        return {
+            "job": name,
+            "queueItem": queue_id,
+            "queueUrl": location or None,
+            "alreadyQueued": queue_id is not None and queue_id in before,
+        }
+
     def artifacts(self, job: str, context: RequestContext, build: object = None) -> dict[str, Any]:
         """One build's artifacts, metadata only, each with a gateway download URL.
 
@@ -331,6 +392,56 @@ class JenkinsHttpBackend:
         return self._open(upstream_path)
 
     # --- internals -----------------------------------------------------
+
+    def _require_triggerable(self, job: str, context: RequestContext) -> str:
+        """Membership of the TRIGGER allowlist, with the read allowlist's own
+        answer for anything else: a job an agent may watch but not start is
+        "unknown" here, exactly as a job in another project is."""
+        names = self._trigger_jobs.get(context.project or "")
+        if not names:
+            raise CiBackendError("no CI jobs may be started by this project", status=404)
+        name = (job or "").strip()
+        if name not in names:
+            raise CiBackendError("unknown job for this project", status=404)
+        return name
+
+    def _queue_ids(self) -> set[int]:
+        """The queue item ids Jenkins is already holding, so a coalesced trigger
+        can be reported as such. Best effort: a queue read that fails must not
+        fail the trigger, it only costs the `alreadyQueued` hint."""
+        try:
+            data = self._request_json("/queue/api/json?tree=items[id]")
+        except CiBackendError:
+            return set()
+        items = data.get("items")
+        return {i["id"] for i in items if isinstance(i, dict) and isinstance(i.get("id"), int)} \
+            if isinstance(items, list) else set()
+
+    def _post(self, path: str) -> str | None:
+        """POST with no body, returning the `Location` header.
+
+        Jenkins requires a CSRF crumb for a password-authenticated POST, and the
+        crumb is bound to the SESSION that fetched it -- measured: a crumb used
+        without its cookie is refused with "No valid crumb". An API TOKEN is
+        exempt from CSRF entirely, which is what JENKINS_TOKEN is meant to be, so
+        this deliberately does not implement a crumb dance that would only paper
+        over the wrong credential being configured. A 403 says so.
+        """
+        req = request.Request(self._base_url + path, data=b"", headers=self._headers(), method="POST")
+        try:
+            with request.urlopen(req, timeout=self._timeout_sec) as response:
+                return response.headers.get("Location")
+        except error.HTTPError as exc:
+            if exc.code == 403:
+                raise CiBackendError(
+                    "CI refused the request (403). JENKINS_TOKEN must be an API token, "
+                    "not an account password: Jenkins exempts API tokens from CSRF and "
+                    "refuses a password POST without a session-bound crumb.",
+                    status=403,
+                ) from exc
+            raise CiBackendError(f"CI HTTP {exc.code}", status=exc.code) from exc
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            raise CiBackendError("CI unavailable") from exc
 
     def _require_allowlisted(self, job: str, context: RequestContext) -> str:
         jobs = self._project_jobs(context)

@@ -59,7 +59,7 @@ deliberately not MCP tools:
 | Secret scan | Reject credential-shaped values on team-visible, append-only writes |
 | OIDC (optional) | Verify an IdP's access token, `sub` → actor; tenancy from a deployment-owned grants file (ADR-0016) |
 | Docs corpus | Per-project git repo mirror: BM25 search, hot-reloaded config, author provenance (ADR-0011, ADR-0015) |
-| CI adapter | Read-only status, build history, log tail and artifact listing, behind a server-side project→jobs allowlist |
+| CI adapter | Status, build history, log tail and artifact listing behind a server-side project→jobs allowlist; `ci.rerun` behind a second, narrower trigger allowlist plus a role and the confirmation gate |
 
 ## Request Flow
 

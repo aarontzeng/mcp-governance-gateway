@@ -18,7 +18,13 @@ from .audit import AuditEvent, AuditSink, JsonLinesAuditSink
 from .auth import AuthError, BearerTokenAuthenticator, IdentityVerifier
 from .config import Settings
 from .oidc import CompositeAuthenticator, GrantsFile, JwksCache, OidcAuthenticator, discover_jwks_url
-from .ci_backend import CiBackendError, JenkinsHttpBackend, STREAM_CHUNK, load_ci_jobs
+from .ci_backend import (
+    CiBackendError,
+    JenkinsHttpBackend,
+    STREAM_CHUNK,
+    load_ci_jobs,
+    load_ci_trigger_jobs,
+)
 from .docs_backend import DocsCorpus, load_docs_repos
 from .internal_api import InternalApi
 from .gitlab_backend import GitLabHttpBackend
@@ -554,6 +560,8 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
             jobs_by_project=load_ci_jobs(settings.ci_jobs_file),
             timeout_sec=settings.jenkins_timeout_sec,
             artifact_base_url=settings.ci_artifact_base_url,
+            trigger_jobs_by_project=(load_ci_trigger_jobs(settings.ci_trigger_jobs_file)
+                                     if settings.ci_trigger_jobs_file else None),
         )
     audit_sink = JsonLinesAuditSink()
     app = GatewayApp(

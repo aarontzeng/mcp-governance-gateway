@@ -41,6 +41,18 @@ All notable changes to this project are recorded here. The format follows
   keep one shared row budget (200); with more allowlisted jobs than that, every
   job returns one build and the answer is as wide as `ci.status` already is.
 
+- `ci.rerun` — start a build of one job. The only `ci.*` tool that changes
+  anything, and it is gated three ways: a **second** allowlist
+  (`CI_TRIGGER_JOBS_FILE`, the jobs a project may *start*, which is not the list
+  `ci.status` shows), the new `ci_runner` role, and the confirmation gate. It
+  takes no build parameters — it re-runs the job as configured. It returns the
+  **queue item**, not a build number, because the build does not exist until
+  Jenkins's quiet period elapses; two reruns inside that window are coalesced
+  into one build, which `alreadyQueued` reports rather than pretending
+  otherwise. `JENKINS_TOKEN` must be an API token: Jenkins exempts those from
+  CSRF and refuses a password POST without a session-bound crumb, and a 403 now
+  says so instead of reading as a permissions problem.
+
 ### Changed
 
 - `ci.status` rows now carry `startedAt` (ISO-8601) beside the existing

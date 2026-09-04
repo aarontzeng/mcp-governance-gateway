@@ -1,7 +1,7 @@
-# CI Adapter (Jenkins, read-only)
+# CI Adapter (Jenkins)
 
-`ci.status` / `ci.builds` / `ci.log` / `ci.artifact` over Jenkins. Read-only by
-design — a rerun tool is a separate item and would need the confirmation gate.
+`ci.status` / `ci.builds` / `ci.log` / `ci.artifact` read Jenkins.
+`ci.rerun` starts a build, and is the only tool here that changes anything.
 
 ## Tenancy
 
@@ -10,6 +10,13 @@ allowlist: `CI_JOBS_FILE` maps `{"<project>": ["job", ...]}`. A token sees only
 its project's jobs, and a job outside the allowlist is "unknown" whether or
 not it exists on the instance — no existence oracle over Jenkins.
 
+`ci.rerun` reads a **second** allowlist, `CI_TRIGGER_JOBS_FILE`, in the same
+shape. Two files rather than one because the questions are different: the jobs
+an agent may watch are not the jobs it may spend build capacity on, and one
+list would make every visible job a startable one. Unset means no project may
+start anything. A job that is watchable but not startable is refused with the
+same 404 a foreign job gets.
+
 ## Tools
 
 | Tool | Arguments | Returns |
@@ -17,6 +24,7 @@ not it exists on the instance — no existence oracle over Jenkins.
 | `ci.status` | — | `jobs[] {job,build,result,building,timestamp,startedAt,durationMs}` (`result`: SUCCESS/FAILURE/BUILDING/UNKNOWN…) |
 | `ci.builds` | `job` (**optional** — omitted means every job in the project), `count` (1–50, default 10) | `{jobs[] {job,builds[] {build,result,building,timestamp,startedAt,durationMs},count},count}`, newest first |
 | `ci.log` | `job`, `lines` (1–1000, default 200) | last-build console tail `{job,build,result,lines[],truncated}` |
+| `ci.rerun` | `job`, `confirm` | `{job,queueItem,queueUrl,alreadyQueued}` — **confirmation-gated**, needs the `ci_runner` role and the trigger allowlist |
 | `ci.artifact` | `job`, `build` (optional, default last successful) | `{job,build,artifacts[] {fileName,relativePath,download}}` — metadata plus a per-file `download` URL, **never bytes** |
 
 `ci.builds` is a **last-N view**: a job that has been red for longer than

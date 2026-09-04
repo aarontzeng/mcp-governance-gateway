@@ -36,8 +36,15 @@ _ISSUE_WRITE_ROLE = "issue_writer"
 # Docs tools are read-only over the project's reviewed docs repo; tenancy is the
 # token's project claim (the corpus map is keyed by project — no new role needed).
 _DOCS_TOOLS = frozenset({"docs.search", "docs.get", "docs.list"})
-# CI tools are read-only; tenancy is the server-side project->jobs allowlist.
-_CI_TOOLS = frozenset({"ci.status", "ci.log", "ci.builds", "ci.artifact"})
+# Tenancy for the CI family is the server-side project->jobs allowlist.
+_CI_READ_TOOLS = frozenset({"ci.status", "ci.log", "ci.builds", "ci.artifact"})
+# ci.rerun spends build capacity, so it takes a SECOND allowlist (the jobs a
+# project may START, which is not the set it may watch), its own role, and the
+# confirmation gate. It is in _CI_TOOLS for dispatch and visibility, and NOT in
+# the read set, because the blanket "ci read" allow must not reach it.
+_CI_WRITE_TOOLS = frozenset({"ci.rerun"})
+_CI_WRITE_ROLE = "ci_runner"
+_CI_TOOLS = _CI_READ_TOOLS | _CI_WRITE_TOOLS
 
 
 @dataclass(frozen=True)
@@ -70,8 +77,12 @@ class Policy:
             return PolicyDecision("allow", "phase1 memory tool")
         if tool_name in _DOCS_TOOLS:
             return PolicyDecision("allow", "docs read")
-        if tool_name in _CI_TOOLS:
+        if tool_name in _CI_READ_TOOLS:
             return PolicyDecision("allow", "ci read")
+        if tool_name in _CI_WRITE_TOOLS:
+            if _CI_WRITE_ROLE not in principal.roles:
+                return PolicyDecision("deny", "token lacks ci run role")
+            return PolicyDecision("allow", "ci run")
         if tool_name in _ISSUE_TOOLS:
             if not principal.issue_project:
                 return PolicyDecision("deny", "token has no issue project")
@@ -128,7 +139,10 @@ class GatewayApp:
         if method == "tools/list":
             docs_enabled = self._docs_corpus is not None and self._docs_corpus.has_project(principal.project)
             ci_enabled = self._ci_backend is not None and self._ci_backend.has_project(principal.project)
-            tools = visible_tool_definitions(principal, self._issue_backend is not None, docs_enabled, ci_enabled)
+            ci_write_enabled = self._ci_backend is not None and \
+                self._ci_backend.has_trigger_project(principal.project)
+            tools = visible_tool_definitions(principal, self._issue_backend is not None, docs_enabled,
+                                             ci_enabled, ci_write_enabled=ci_write_enabled)
             return _result(request_id, {"tools": tools})
         if method == "tools/call":
             return self._handle_tool_call(request_id, params, principal)
@@ -402,6 +416,16 @@ class GatewayApp:
             job = _required_text(arguments, "job", max_len=200)
             build = _optional_int(arguments, "build", minimum=1, maximum=1_000_000_000)
             return self._ci_backend.artifacts(job, context, build)
+        if name == "ci.rerun":
+            job = _required_text(arguments, "job", max_len=200)
+            # The gate before the side effect, as issues.create does: a rerun that
+            # started a build and THEN asked for confirmation would have spent the
+            # thing the confirmation exists to protect.
+            pending = self._confirmation_gate(
+                name, {"job": job}, arguments, principal, f"Start a CI build of {job!r}")
+            if pending is not None:
+                return pending
+            return self._ci_backend.rerun(job, context)
         raise ValueError(f"Unknown ci tool: {name}")
 
     def _confirmation_gate(
@@ -858,6 +882,27 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "ci.rerun",
+            "description": (
+                "Start a build of one CI job (two-step: call once to get a confirmationId, "
+                "then again with `confirm` set). Re-runs the job as configured; there are no "
+                "build parameters. Returns the QUEUE ITEM, not a build number — the build does "
+                "not exist until Jenkins's quiet period elapses, and two reruns inside it are "
+                "coalesced into one build, which `alreadyQueued` reports. Poll ci.builds for the "
+                "result. Only jobs on this project's trigger allowlist can be started, which is "
+                "not the same list ci.status shows you."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job": {"type": "string"},
+                    "confirm": {"type": "string"},
+                },
+                "required": ["job"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "ci.artifact",
             "description": (
                 "List one build's artifacts for a CI job: fileName, relativePath and a gateway "
@@ -883,7 +928,8 @@ def tool_definitions() -> list[dict[str, Any]]:
 
 
 def visible_tool_definitions(
-    principal: Principal, issue_enabled: bool, docs_enabled: bool = False, ci_enabled: bool = False
+    principal: Principal, issue_enabled: bool, docs_enabled: bool = False, ci_enabled: bool = False,
+    ci_write_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     # Advertise only the tools this principal could actually call: issue tools need
     # the backend configured and an issue_project, and issue writes need the write
@@ -901,6 +947,8 @@ def visible_tool_definitions(
         if name in _DOCS_TOOLS and not docs_enabled:
             continue
         if name in _CI_TOOLS and not ci_enabled:
+            continue
+        if name in _CI_WRITE_TOOLS and not (ci_write_enabled and _CI_WRITE_ROLE in principal.roles):
             continue
         visible.append(tool)
     return visible
