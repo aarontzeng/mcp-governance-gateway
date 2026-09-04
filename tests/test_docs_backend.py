@@ -71,18 +71,28 @@ def _sh(cwd, *cmd):
     subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
 
 
+def _init_bare(tmp: str, remote: str) -> None:
+    """A bare repo whose HEAD is `master`, without needing a recent git.
+
+    `init -b master` says this in one command, but `-b` arrived in git 2.28 and
+    the gateway itself uses only clone/fetch/ls-tree/cat-file/remote/reset/
+    rev-parse -- all ancient. A fixture that demands a newer git than the code
+    under test is a portability bug in the SUITE, and it presents as every test
+    in the file failing inside setUp with exit 129 and no assertion message.
+
+    One helper rather than the same two lines three times: the first attempt at
+    this fixed the shared `_make_remote` and missed the two classes that build
+    their remote inline, so 42 failures became 5 instead of 0.
+    """
+    _sh(tmp, "git", "init", "-q", "--bare", remote)
+    _sh(tmp, "git", "-C", remote, "symbolic-ref", "HEAD", "refs/heads/master")
+
+
 def _make_remote(tmp: str, name: str, files: dict[str, str]) -> str:
     """A bare 'remote' with a working clone to author commits."""
     remote = str(Path(tmp) / f"{name}.git")
     work = str(Path(tmp) / f"{name}-work")
-    # `init --bare` then point HEAD by hand, rather than `init -b master`:
-    # `-b` arrived in git 2.28, and a fixture that needs a newer git than the
-    # code under test does is a portability bug in the SUITE. The gateway itself
-    # uses only clone/fetch/ls-tree/cat-file/remote/reset/rev-parse.
-    # (Reported from a box running git 2.25, where every test in this file
-    # failed in setUp with exit 129.)
-    _sh(tmp, "git", "init", "-q", "--bare", remote)
-    _sh(tmp, "git", "-C", remote, "symbolic-ref", "HEAD", "refs/heads/master")
+    _init_bare(tmp, remote)
     _sh(tmp, "git", "clone", "-q", remote, work)
     _sh(work, "git", "config", "user.email", "t@example.com")
     _sh(work, "git", "config", "user.name", "T")
@@ -195,7 +205,7 @@ class AuthorProvenanceTests(unittest.TestCase):
         self.tmp = self._tmp.name
         self.remote = str(Path(self.tmp) / "prov.git")
         self.work = str(Path(self.tmp) / "prov-work")
-        _sh(self.tmp, "git", "init", "-q", "--bare", "-b", "master", self.remote)
+        _init_bare(self.tmp, self.remote)
         _sh(self.tmp, "git", "clone", "-q", self.remote, self.work)
         self._commit("author-one", "one@example.com", {
             "wiki/a.md": "# A first\n",
@@ -374,7 +384,7 @@ class CloneHistoryTests(unittest.TestCase):
         self.tmp = self._tmp.name
         self.remote = str(Path(self.tmp) / "hist.git")
         work = str(Path(self.tmp) / "hist-work")
-        _sh(self.tmp, "git", "init", "-q", "--bare", "-b", "master", self.remote)
+        _init_bare(self.tmp, self.remote)
         _sh(self.tmp, "git", "clone", "-q", self.remote, work)
         for author, files, msg in [
             ("first-author", {"wiki/a.md": "# A\n"}, "add a"),
@@ -768,3 +778,27 @@ class TreeReadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FixturePortabilityTests(unittest.TestCase):
+    """The suite must not need a newer git than the gateway does.
+
+    This exists because the first fix for it was incomplete: the shared helper
+    was corrected and the two classes that build their remote inline were
+    missed, so a box on git 2.25 went from 42 failures to 5 rather than to 0.
+    The failure is silent from a machine with a new enough git -- every spelling
+    works here -- so a mechanical check is the only thing that notices.
+    """
+
+    def test_no_fixture_asks_git_for_a_flag_the_gateway_never_uses(self):
+        import re
+        from pathlib import Path as _Path
+
+        # `git init -b` / `--initial-branch` needs git 2.28; use _init_bare().
+        pattern = re.compile(r'"git",\s*"init"[^)]*?"(-b|--initial-branch)"')
+        offenders = []
+        for path in sorted(_Path(__file__).resolve().parent.glob("test_*.py")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if pattern.search(line):
+                    offenders.append(f"{path.name}:{number}")
+        self.assertEqual(offenders, [], "use _init_bare() instead of `git init -b`")
