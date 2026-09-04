@@ -43,21 +43,20 @@ And the observations that establish both facts were made against one specific
 backend version; publishing them as a general claim about that project, rather
 than reporting them upstream, would be the wrong way round.
 
-## CI: controlled rerun
+## CI: parameterised triggers
 
-`ci.builds` now answers "is this test flaky" and "when did this start failing"
-within the last N builds it returns — a job red for longer than that window
-still looks the same as one red since its first build, and a project-wide call
-across more jobs than the row budget returns one build each, which answers
-neither question and is the point at which to name a job. It reuses the read
-allowlist and the read quota; what it adds is volume, not a new class of
-disclosure: a series of results and durations rather than a single row.
+`ci.builds` and `ci.rerun` both shipped in 0.2.0. `ci.rerun` re-runs a job as
+configured, behind a trigger allowlist separate from the read one, the
+`ci_runner` role and the confirmation gate.
 
-A rerun tool is a genuine write: it consumes build resources. It would need the
-confirmation gate, a dedicated role, and a **trigger allowlist separate from the
-read allowlist** — the set of jobs an agent may start is not the set it may
-watch. Triggering an arbitrary parameterized build stays out until that is
-tighter still.
+What stays out is a **parameterised** trigger: caller-supplied values reaching a
+build are a different trust surface from starting a job whose parameters an
+operator already chose, and nothing here validates what a parameter means to a
+job. It would need per-job parameter allowlisting to be worth having.
+
+Two limits of what did ship, both inherent rather than bugs: a last-N view
+cannot date a failure older than its window, and a job inside a Jenkins folder
+cannot be named in either allowlist because names are URL-quoted whole.
 
 ## Notifications
 
@@ -65,21 +64,19 @@ Everything here is pull. A red build, a stale review or an overdue action waits
 for someone to think to ask. An outbound-only push channel is designed but not
 built; reading messages back into agents is an anti-goal.
 
-## Credential enrollment: a primitive, not a portal
+## Credential enrollment
 
-`docs/security-model.md` and this roadmap say credential provisioning is outside
-this project. That is true of the **UI**, and the phrasing has been overclaiming:
-the gateway does expose `/internal/redmine-key` and `/internal/my-issues` on the
-same listener, which is the API a portal would call. What is missing is the
-contract around it — the required ingress boundary (it must not be routed
-publicly), the offboarding path, and what happens when a user's email changes,
-since enrollment uses email as the proof that a downstream credential belongs to
-an actor while ADR-0007 treats email as a display label only.
+Settled in 0.2.0. `/internal/credentials` (with `/internal/redmine-key` kept as
+a permanent alias) and `/internal/my-issues` are a supported integration
+primitive with a written contract in `docs/operations.md`: the ingress boundary,
+the fact that the surface acts only on the bearer's own actor, why ADR-0004's
+signed identity headers are deliberately not applied there, what an email change
+does, and an offboarding order. `ADMIN_PORT` binds them to their own listener,
+and the MCP listener then answers 404 for them.
 
-Either that contract gets written and the routes become a supported integration
-primitive, or they should be isolated behind their own listener. Until then, treat
-them as unsupported surface: reachable only from the host, and not part of the
-compatibility promise.
+The UI is still not this project's (see "Not planned"), and now needs no
+apology: a deployment with an IdP mints nothing at all (ADR-0016), and one
+without has `mcpgw-admin`.
 
 ## Durable write outcomes and shared state
 
