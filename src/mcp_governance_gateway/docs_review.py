@@ -66,6 +66,7 @@ class DocsReviewService:
 
     def create(self, path: str, content: str, message: str, context: RequestContext) -> dict[str, Any]:
         spec, backend, credential = self._resolve(context)
+        self._require_servable(path)
         self._refuse_if_present(spec, path, context)
         result = backend.open_change(spec, path, content, message, credential, context)
         return {"path": path, **result, "status": "proposed"}
@@ -73,6 +74,7 @@ class DocsReviewService:
     def update(self, path: str, content: str, message: str, base_sha: str,
                context: RequestContext) -> dict[str, Any]:
         spec, backend, credential = self._resolve(context)
+        self._require_servable(path)
         result = backend.update_change(spec, path, content, message, base_sha, credential, context)
         return {"path": path, **result, "status": "proposed"}
 
@@ -88,6 +90,31 @@ class DocsReviewService:
         return backend.get_change(spec, change_ref, credential, context)
 
     # --- internals -------------------------------------------------------
+
+    def _require_servable(self, path: str) -> None:
+        """The write path may only propose files the READ path would serve.
+
+        Without this the docs tools are a general "propose any file into this
+        repository" primitive: nothing else stopped `docs.create` naming
+        `.github/workflows/ci.yml`, or a source file, or a `CODEOWNERS`. A human
+        still has to merge it, so it is not a direct compromise -- it is a much
+        better phishing lure than a Markdown file, sitting behind a tool whose
+        name says "docs".
+
+        The rule is exactly the read path's own filter (`_load_docs`): under one
+        of the served directories, ending in `.md`, and no dot-prefixed segment.
+        Keeping them identical is the point -- a document you could propose but
+        never read back would be a strange thing to be able to make.
+        """
+        served = getattr(self._corpus, "SERVED_DIRS", ("raw/", "wiki/"))
+        parts = path.split("/")
+        if (not path.startswith(tuple(served)) or not path.endswith(".md")
+                or any(part.startswith(".") or not part for part in parts)):
+            raise ReviewBackendError(
+                f"documents live under {' or '.join(served)} and end in .md; {path!r} does not, "
+                "and this tool proposes documents rather than arbitrary files",
+                status=400,
+            )
 
     def _refuse_if_present(self, spec: ReviewSpec, path: str, context: RequestContext) -> None:
         """A create against an existing document is refused here as well as by

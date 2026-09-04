@@ -17,6 +17,8 @@ from urllib.parse import parse_qs, urlparse, urlsplit
 from .audit import AuditEvent, AuditSink, JsonLinesAuditSink
 from .auth import AuthError, BearerTokenAuthenticator, IdentityVerifier
 from .config import Settings
+from .docs_review import DocsReviewService
+from .review_backend import GitHubReviewBackend
 from .oidc import CompositeAuthenticator, GrantsFile, JwksCache, OidcAuthenticator, discover_jwks_url
 from .ci_backend import (
     CiBackendError,
@@ -563,6 +565,18 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
             trigger_jobs_by_project=(load_ci_trigger_jobs(settings.ci_trigger_jobs_file)
                                      if settings.ci_trigger_jobs_file else None),
         )
+    # The docs write path exists only when a project's corpus names a review host
+    # AND a credential store is configured: proposals are made under the caller's
+    # own credential, so without a store there is nobody for the gateway to be.
+    docs_review = None
+    if docs_corpus is not None and keystore is not None:
+        docs_review = DocsReviewService(
+            corpus=docs_corpus,
+            backends={"github": GitHubReviewBackend(timeout_sec=settings.docs_review_timeout_sec)},
+            key_resolver=lambda actor, backend: keystore.get(actor, backend=backend),
+            credential_portal_url=settings.credential_portal_url,
+        )
+
     audit_sink = JsonLinesAuditSink()
     app = GatewayApp(
         memory_backend=memory_backend,
@@ -571,6 +585,7 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
         issue_backend=issue_backend,
         docs_corpus=docs_corpus,
         ci_backend=ci_backend,
+        docs_review=docs_review,
     )
     server = GatewayHTTPServer((settings.host, settings.port), make_handler())
     server.app = app
