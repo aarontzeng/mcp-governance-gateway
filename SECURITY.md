@@ -64,7 +64,17 @@ what every backend did.
 token's project to agentmemory and returns what comes back; the hits carry no
 project field, so the gateway cannot re-filter them the way it re-filters issue
 and docs results. A backend that ignores its own filter would leak across tenants
-through this one tool. `memory.action_update_status` checks the target's project
+through this one tool — and this is sharper than a hypothetical. Read at
+agentmemory v0.9.29 (`e04ba88`): `mem::search` does filter per row, by loading
+each hit's session and comparing `session.project`, but it has a **deliberate
+fail-open branch**. When the session has been evicted it falls back to the
+observation's own recorded project, and a `null` there is documented in that
+code as "project unknown — treat as unscoped and let it through", for backward
+compatibility. So a hit whose session is gone and whose observation carries no
+project reaches the caller regardless of the project asked for. The gateway
+cannot detect this: the hits carry no project field for it to re-check. Treat
+`memory.search` results as scoped by a filter that is best-effort at the
+backend, not as a tenant boundary the gateway enforces. `memory.action_update_status` checks the target's project
 by listing first and then updates by id, so a record re-homed between the two
 calls is updated on its new project.
 

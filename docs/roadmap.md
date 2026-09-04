@@ -34,14 +34,38 @@ project other people deploy.
 
 ## Memory: semantic retrieval
 
-`memory.search` is keyword retrieval. The memory backend also exposes a
-hybrid BM25+vector+graph endpoint, which is not wired up here for two reasons.
-It performs no project filtering of its own, so the gateway would have to
-re-verify every candidate's tenancy — and the straightforward way to do that
-costs a full corpus fetch per query, which does not scale past a small corpus.
-And the observations that establish both facts were made against one specific
-backend version; publishing them as a general claim about that project, rather
-than reporting them upstream, would be the wrong way round.
+`memory.search` is keyword retrieval. The backend also exposes a hybrid
+BM25+vector+graph endpoint (`mem::smart-search`) that is not wired up here,
+because it performs no project filtering of its own — and re-verifying every
+candidate's tenancy needed a `sessionId -> project` lookup the gateway had no
+way to make.
+
+**Re-checked at agentmemory v0.9.29 (`e04ba88`, 2026-08-23), which changes one
+of the three blockers:**
+
+- Still true: no `mem::smart-search` entry point uses `project` for memory
+  retrieval. It is accepted in the input type and passed only to
+  `recallLessons`, which is lesson search.
+- Still true: the expand path is capped at 20 ids and filters only by
+  `agentId`, never by project.
+- **No longer true:** there IS now a REST route carrying a session's project —
+  `GET /agentmemory/replay/load` returns `{timeline, session}` and `Session`
+  has `project`. But it is a replay loader: the same handler loads every
+  observation for the session and builds a timeline, to answer a question that
+  is one KV read. So the blocker moved from "impossible" to "possible and
+  absurdly expensive", which is a different decision.
+
+The useful shape of the ask is therefore upstream rather than local: the cheap
+lookup already exists inside that handler (`kv.get<Session>(KV.sessions, id)`),
+and exposing it on its own route — or accepting a project filter in
+smart-search — would make semantic retrieval a small change here instead of an
+impossible one. Reporting that upstream is the next step, not building a
+client-side workaround around a replay endpoint.
+
+Note the related finding now recorded in [SECURITY.md](../SECURITY.md#known-limitations):
+the filter `mem::search` does apply has a documented fail-open branch for
+evicted sessions, so today's keyword path is not the clean baseline the
+smart-search comparison assumed either.
 
 ## CI: parameterised triggers
 
