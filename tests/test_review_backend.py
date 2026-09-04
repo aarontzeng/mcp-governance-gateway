@@ -27,7 +27,7 @@ def _spec(project: str = "proj-docs", repo: str = "example-org/docs-corpus", bas
     )
 
 
-def _ctx(actor: str = "10112030", request_id: str = "req-test-1") -> RequestContext:
+def _ctx(actor: str = "10000001", request_id: str = "req-test-1") -> RequestContext:
     return RequestContext(actor=actor, project="proj-docs", client="t", request_id=request_id)
 
 
@@ -201,7 +201,7 @@ class GitHubReviewBackendTests(unittest.TestCase):
 
     def test_comment_posts_to_issue_comments_and_never_pull_reviews(self) -> None:
         backend = FakeGitHub()
-        stamped_body = "Looks good to me.\n\n[via mcp-governance-gateway | actor=10112030 | audit=req-1]"
+        stamped_body = "Looks good to me.\n\n[via mcp-governance-gateway | actor=10000001 | audit=req-1]"
         backend.comment(self.spec, 42, stamped_body, "tok", self.ctx)
 
         self.assertEqual(len(backend.recorded), 1)

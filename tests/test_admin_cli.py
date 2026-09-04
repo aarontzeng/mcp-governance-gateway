@@ -84,7 +84,7 @@ class MintTests(_CliTestCase):
     def test_actor_is_required_and_never_defaulted(self):
         # ADR-0007 wants a VERIFIED immutable id. A value this tool guessed from
         # $USER would be neither, so there is no default to guess from.
-        os.environ["USER"] = "aaron"
+        os.environ["USER"] = "some-operator"
         with self.assertRaises(SystemExit):
             main(["--store", str(self.store), "mint", "--project", "p"])
         self.assertFalse(self.store.exists())
