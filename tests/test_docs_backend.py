@@ -75,7 +75,14 @@ def _make_remote(tmp: str, name: str, files: dict[str, str]) -> str:
     """A bare 'remote' with a working clone to author commits."""
     remote = str(Path(tmp) / f"{name}.git")
     work = str(Path(tmp) / f"{name}-work")
-    _sh(tmp, "git", "init", "-q", "--bare", "-b", "master", remote)
+    # `init --bare` then point HEAD by hand, rather than `init -b master`:
+    # `-b` arrived in git 2.28, and a fixture that needs a newer git than the
+    # code under test does is a portability bug in the SUITE. The gateway itself
+    # uses only clone/fetch/ls-tree/cat-file/remote/reset/rev-parse.
+    # (Reported from a box running git 2.25, where every test in this file
+    # failed in setUp with exit 129.)
+    _sh(tmp, "git", "init", "-q", "--bare", remote)
+    _sh(tmp, "git", "-C", remote, "symbolic-ref", "HEAD", "refs/heads/master")
     _sh(tmp, "git", "clone", "-q", remote, work)
     _sh(work, "git", "config", "user.email", "t@example.com")
     _sh(work, "git", "config", "user.name", "T")

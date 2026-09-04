@@ -15,6 +15,16 @@ the bar for a change; every backend has unit tests that drive it through a
 scripted fake (see `tests/`), so you can add or change a backend without a live
 instance.
 
+**Python 3.11 or newer, and `git` on `PATH`.** The docs-corpus tests build real
+git repositories as fixtures, so a `git` older than the suite expects fails
+every test in `tests/test_docs_backend.py` inside `setUp` rather than as an
+assertion — if you see that, check `git --version` before anything else. The
+fixtures stay on flags old enough not to need a recent one; if you add a fixture
+that needs a newer flag, prefer the portable spelling, because the gateway
+itself only uses `clone`, `fetch`, `ls-tree`, `cat-file`, `remote`, `reset` and
+`rev-parse`, and a test suite that demands more than the code does is a
+portability bug in the suite.
+
 ## Ground rules
 
 - **Keep the tenancy boundary server-side.** No tool may take the project/tenant
