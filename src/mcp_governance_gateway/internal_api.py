@@ -127,7 +127,7 @@ class InternalApi:
     def clear_key(self, principal: Principal) -> tuple[int, dict]:
         if self._keystore is None:
             return 404, {"error": "personal key store not configured"}
-        cleared = self._keystore.clear(principal.actor)
+        cleared = self._keystore.clear(principal.actor, backend=self._backend_name)
         self._emit(principal, "redmine.key.clear", "ok" if cleared else "noop")
         return 200, {"ok": True, "cleared": cleared}
 

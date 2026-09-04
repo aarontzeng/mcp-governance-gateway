@@ -67,8 +67,8 @@ class RedmineKeyStoreTests(unittest.TestCase):
         ks = self.store()
         ks.set(_ACTOR, "secretkey", "jdoe")
         data = json.loads(self.path.read_text())
-        blob = base64.b64decode(data["keys"][_ACTOR]["ct"])
-        data["keys"][_ACTOR]["ct"] = base64.b64encode(blob[:-1] + bytes([blob[-1] ^ 0xFF])).decode()
+        blob = base64.b64decode(data["keys"][_ACTOR]["redmine"]["ct"])
+        data["keys"][_ACTOR]["redmine"]["ct"] = base64.b64encode(blob[:-1] + bytes([blob[-1] ^ 0xFF])).decode()
         self.path.write_text(json.dumps(data))
         state, key = self.store().get(_ACTOR)  # same master, fresh instance re-reads the file
         self.assertIs(state, KeyState.UNDECRYPTABLE)
@@ -131,9 +131,9 @@ class RedmineKeyStoreTests(unittest.TestCase):
     def test_nonce_unique_for_same_plaintext(self):
         ks = self.store()
         ks.set(_ACTOR, "same", "jdoe")
-        ct1 = json.loads(self.path.read_text())["keys"][_ACTOR]["ct"]
+        ct1 = json.loads(self.path.read_text())["keys"][_ACTOR]["redmine"]["ct"]
         ks.set(_ACTOR, "same", "jdoe")
-        ct2 = json.loads(self.path.read_text())["keys"][_ACTOR]["ct"]
+        ct2 = json.loads(self.path.read_text())["keys"][_ACTOR]["redmine"]["ct"]
         self.assertNotEqual(ct1, ct2)  # fresh random nonce each write
 
     def test_load_master_keys_roundtrip_and_absent(self):
@@ -369,7 +369,7 @@ class BackendDimensionTests(unittest.TestCase):
         st = self.store()
         st.set("10000000", "GITLAB-PAT", "alice", backend="gitlab")
         data = _json.loads(self.path.read_text())
-        data["keys"]["10000000"]["backend"] = "redmine"
+        data["keys"]["10000000"]["redmine"] = data["keys"]["10000000"].pop("gitlab")
         self.path.write_text(_json.dumps(data))
         state, key = self.store().get("10000000")  # now claims to be redmine
         self.assertIs(state, KeyState.UNDECRYPTABLE)
@@ -381,6 +381,114 @@ class BackendDimensionTests(unittest.TestCase):
         st.set("10000000", "NEW-REDMINE-KEY", "alice")  # re-enroll (backend=redmine)
         import json as _json
         rec = _json.loads(self.path.read_text())["keys"]["10000000"]
-        self.assertEqual(rec["backend"], "redmine")
+        self.assertEqual(rec["redmine"]["backend"], "redmine")
         state, key = self.store().get("10000000")
         self.assertEqual((state, key), (KeyState.OK, "NEW-REDMINE-KEY"))
+
+
+class PerBackendRecordTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = Path(self.dir) / "keys.json"
+        self.keys = _mk(1)
+
+    def store(self):
+        return RedmineKeyStore(self.path, active_key_id="mk1", master_keys=self.keys)
+
+    def _write_legacy_entry(self, actor, plaintext, backend=None):
+        """Craft a pre-nested legacy flat record."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _A
+        nonce = os.urandom(12)
+        aad = (f"{actor}|{backend}" if backend else actor).encode()
+        ct = _A(self.keys["mk1"]).encrypt(nonce, plaintext.encode(), aad)
+        rec = {
+            "ct": base64.b64encode(nonce + ct).decode(),
+            "key_id": "mk1",
+            "redmine_login": f"login-{actor}",
+            "updated_at": "2026-07-01T00:00:00Z",
+        }
+        if backend:
+            rec["backend"] = backend
+        return rec
+
+    def test_one_actor_holds_redmine_and_gitlab_keys_simultaneously_and_both_decrypt(self):
+        # An actor can hold credentials for multiple distinct backends without collision.
+        st = self.store()
+        st.set(_ACTOR, "REDMINE-KEY", "alice", backend="redmine")
+        st.set(_ACTOR, "GITLAB-TOKEN", "alice", backend="gitlab")
+        state_r, key_r = st.get(_ACTOR, backend="redmine")
+        self.assertIs(state_r, KeyState.OK)
+        self.assertEqual(key_r, "REDMINE-KEY")
+        state_g, key_g = st.get(_ACTOR, backend="gitlab")
+        self.assertIs(state_g, KeyState.OK)
+        self.assertEqual(key_g, "GITLAB-TOKEN")
+
+    def test_enrolling_second_backend_does_not_destroy_first_backend_key(self):
+        # Regression check: in the flat format, set() overwrote the actor's only slot.
+        st = self.store()
+        st.set(_ACTOR, "REDMINE-KEY", "alice", backend="redmine")
+        st.set(_ACTOR, "GITLAB-TOKEN", "alice", backend="gitlab")
+        reopened = self.store()
+        state, key = reopened.get(_ACTOR, backend="redmine")
+        self.assertIs(state, KeyState.OK)
+        self.assertEqual(key, "REDMINE-KEY")
+
+    def test_clearing_one_backend_leaves_other_backend_intact(self):
+        # clear() must clear only the target backend rather than the entire actor.
+        st = self.store()
+        st.set(_ACTOR, "REDMINE-KEY", "alice", backend="redmine")
+        st.set(_ACTOR, "GITLAB-TOKEN", "alice", backend="gitlab")
+        self.assertTrue(st.clear(_ACTOR, backend="redmine"))
+        state_r, key_r = st.get(_ACTOR, backend="redmine")
+        self.assertIs(state_r, KeyState.MISSING)
+        self.assertIsNone(key_r)
+        state_g, key_g = st.get(_ACTOR, backend="gitlab")
+        self.assertIs(state_g, KeyState.OK)
+        self.assertEqual(key_g, "GITLAB-TOKEN")
+
+    def test_clearing_last_backend_removes_actor_from_disk_entirely(self):
+        # Avoid leaving empty actor maps {"<actor>": {}} in the persistent store file.
+        st = self.store()
+        st.set(_ACTOR, "REDMINE-KEY", "alice", backend="redmine")
+        st.set(_ACTOR, "GITLAB-TOKEN", "alice", backend="gitlab")
+        self.assertTrue(st.clear(_ACTOR, backend="redmine"))
+        raw = json.loads(self.path.read_text())
+        self.assertIn(_ACTOR, raw["keys"])
+        self.assertIn("gitlab", raw["keys"][_ACTOR])
+        self.assertNotIn("redmine", raw["keys"][_ACTOR])
+        self.assertTrue(st.clear(_ACTOR, backend="gitlab"))
+        raw = json.loads(self.path.read_text())
+        self.assertNotIn(_ACTOR, raw["keys"])
+        self.assertFalse(st.clear(_ACTOR, backend="gitlab"))
+
+    def test_legacy_flat_shape_file_is_read_for_own_backend_and_missing_for_others(self):
+        # On-disk files written prior to per-backend indexing must remain readable forever.
+        rec = self._write_legacy_entry(_ACTOR, "LEGACY-REDMINE-KEY")
+        self.path.write_text(json.dumps({"keys": {_ACTOR: rec}}))
+        st = self.store()
+        state_r, key_r = st.get(_ACTOR, backend="redmine")
+        self.assertIs(state_r, KeyState.OK)
+        self.assertEqual(key_r, "LEGACY-REDMINE-KEY")
+        self.assertEqual(st.status(_ACTOR, backend="redmine")["redmineLogin"], f"login-{_ACTOR}")
+        state_g, key_g = st.get(_ACTOR, backend="gitlab")
+        self.assertIs(state_g, KeyState.MISSING)
+        self.assertIsNone(key_g)
+
+    def test_legacy_file_upgraded_to_nested_on_write_and_other_actors_untouched(self):
+        # Writing for an actor converts that actor's slot to nested format without modifying others.
+        rec1 = self._write_legacy_entry("10000001", "ACTOR1-OLD-KEY")
+        rec2 = self._write_legacy_entry("10000002", "ACTOR2-OLD-KEY")
+        self.path.write_text(json.dumps({"keys": {"10000001": rec1, "10000002": rec2}}))
+        st = self.store()
+        st.set("10000001", "ACTOR1-GITLAB-TOKEN", "alice", backend="gitlab")
+        raw = json.loads(self.path.read_text())
+        # Actor 1 is upgraded to nested shape holding both the preserved legacy redmine key and new gitlab key
+        self.assertIn("ct", raw["keys"]["10000001"]["redmine"])
+        self.assertIn("ct", raw["keys"]["10000001"]["gitlab"])
+        # Actor 2 remains in legacy flat shape untouched
+        self.assertIn("ct", raw["keys"]["10000002"])
+        self.assertNotIn("redmine", raw["keys"]["10000002"])
+        # All credentials decrypt correctly
+        self.assertEqual(st.get("10000001", backend="redmine"), (KeyState.OK, "ACTOR1-OLD-KEY"))
+        self.assertEqual(st.get("10000001", backend="gitlab"), (KeyState.OK, "ACTOR1-GITLAB-TOKEN"))
+        self.assertEqual(st.get("10000002", backend="redmine"), (KeyState.OK, "ACTOR2-OLD-KEY"))

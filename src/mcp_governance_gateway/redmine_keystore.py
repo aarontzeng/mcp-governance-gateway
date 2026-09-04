@@ -141,14 +141,23 @@ class RedmineKeyStore:
             print(f"credential store reload failed; keeping the last-good records: {exc}", file=sys.stderr, flush=True)
         self._sig = sig
 
+    def _get_record(self, actor: str, backend: str) -> dict | None:
+        raw = self._records.get(actor)
+        if not isinstance(raw, dict):
+            return None
+        if "ct" in raw:
+            if (raw.get("backend") or "redmine") == backend:
+                return raw
+            return None
+        rec = raw.get(backend)
+        if isinstance(rec, dict):
+            return rec
+        return None
+
     def get(self, actor: str, backend: str = "redmine") -> tuple[KeyState, str | None]:
         self._reload()
-        rec = self._records.get(actor)
-        if not isinstance(rec, dict):
-            return KeyState.MISSING, None
-        # A credential enrolled for one backend is not a credential for another:
-        # legacy records (no "backend" field) are Redmine-era and count as redmine.
-        if (rec.get("backend") or "redmine") != backend:
+        rec = self._get_record(actor, backend)
+        if rec is None:
             return KeyState.MISSING, None
         if self.degraded:
             # Master key entirely absent. NOT per-user UNDECRYPTABLE -- one missing
@@ -186,7 +195,7 @@ class RedmineKeyStore:
 
     def status(self, actor: str, backend: str = "redmine") -> dict:
         state, _ = self.get(actor, backend)
-        rec = self._records.get(actor) if isinstance(self._records.get(actor), dict) else {}
+        rec = self._get_record(actor, backend) or {}
         return {
             "hasKey": state is KeyState.OK,
             "state": state.value,
@@ -216,16 +225,45 @@ class RedmineKeyStore:
         with self._lock:
             self._reload()
             records = dict(self._records)
-            records[actor] = record
+            raw = records.get(actor)
+            if isinstance(raw, dict) and "ct" in raw:
+                legacy_backend = raw.get("backend") or "redmine"
+                actor_map = {legacy_backend: raw}
+            elif isinstance(raw, dict):
+                actor_map = dict(raw)
+            else:
+                actor_map = {}
+            actor_map[backend] = record
+            records[actor] = actor_map
             self._atomic_write(records)
 
-    def clear(self, actor: str) -> bool:
+    def clear(self, actor: str, backend: str = "redmine") -> bool:
         with self._lock:
             self._reload()
             if actor not in self._records:
                 return False
+            raw = self._records[actor]
+            if not isinstance(raw, dict):
+                records = dict(self._records)
+                records.pop(actor, None)
+                self._atomic_write(records)
+                return True
             records = dict(self._records)
-            records.pop(actor, None)
+            if "ct" in raw:
+                legacy_backend = raw.get("backend") or "redmine"
+                if legacy_backend != backend:
+                    return False
+                records.pop(actor, None)
+                self._atomic_write(records)
+                return True
+            if backend not in raw:
+                return False
+            actor_map = dict(raw)
+            actor_map.pop(backend, None)
+            if not actor_map:
+                records.pop(actor, None)
+            else:
+                records[actor] = actor_map
             self._atomic_write(records)
             return True
 
