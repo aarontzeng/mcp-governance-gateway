@@ -23,11 +23,19 @@ propose" a statement about a human being accountable for the proposal.
 """
 from __future__ import annotations
 
+import base64
+import http.client
+import json
 import re
+import secrets
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib import error, parse, request
 
-from .issue_backend import IssueBackendError as ReviewBackendError  # same shape/semantics
+from .issue_backend import (
+    IssueBackendError as ReviewBackendError,  # same shape/semantics
+    _MAX_RESPONSE_BYTES,
+)
 from .memory_backend import RequestContext
 
 # The attribution footer, in the shape `issue_backend` already stamps on notes.
@@ -146,3 +154,249 @@ def stamped(body: str, context: RequestContext) -> str:
     wrote themselves, and the difference is the point.
     """
     return f"{body.rstrip()}\n\n{FOOTER.format(actor=context.actor, request_id=context.request_id)}"
+
+
+def _validate_change_ref(change_ref: Any) -> int:
+    """Validate that change_ref is a positive integer before using in URL segments."""
+    if isinstance(change_ref, bool) or not isinstance(change_ref, int) or change_ref <= 0:
+        raise ReviewBackendError(
+            f"change_ref must be a positive integer, got {change_ref!r}",
+            status=400,
+        )
+    return change_ref
+
+
+def _quote_path(path: str) -> str:
+    """Validate path and percent-encode each segment safely."""
+    if not isinstance(path, str) or not path or path.startswith("/"):
+        raise ReviewBackendError(f"invalid document path: {path!r}", status=400)
+    segments = path.split("/")
+    if any(seg == ".." for seg in segments):
+        raise ReviewBackendError(f"path must not contain '..' segments: {path!r}", status=400)
+    return "/".join(parse.quote(seg, safe="") for seg in segments)
+
+
+def _derive_branch(path: str) -> str:
+    """Derive a proposal branch name matching [a-z0-9._/-]+ with a random suffix."""
+    suffix = secrets.token_hex(4)
+    slug = re.sub(r"[^a-z0-9._-]+", "-", path.lower()).strip("-")
+    slug = slug[:85].rstrip("-")
+    if not slug:
+        slug = "doc"
+    return f"mcpgw/{slug}-{suffix}"
+
+
+class GitHubReviewBackend:
+    """Propose document changes via GitHub REST API.
+
+    Implements the ReviewBackend protocol. Holds no service account or
+    credential; every call authenticates with the caller's own token.
+    """
+
+    def __init__(self, timeout_sec: float = 30.0) -> None:
+        self._timeout_sec = timeout_sec
+
+    def _request(
+        self,
+        spec: ReviewSpec,
+        method: str,
+        path: str,
+        credential: str,
+        body: dict[str, Any] | None = None,
+    ) -> Any:
+        url = f"{spec.api.rstrip('/')}{path}"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {credential}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with request.urlopen(req, timeout=self._timeout_sec) as response:
+                raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        except error.HTTPError as exc:
+            raise ReviewBackendError(f"review host HTTP {exc.code}", status=exc.code) from exc
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # A garbled or truncated reply is an HTTPException, not an OSError, and
+            # a credential or redirect the request cannot be encoded with is a
+            # ValueError; either way the backend is unusable, not the caller.
+            raise ReviewBackendError("review host unavailable") from exc
+        if len(raw) > _MAX_RESPONSE_BYTES:
+            raise ReviewBackendError("review host response too large")
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ReviewBackendError("review host returned invalid JSON") from exc
+
+    def _propose(
+        self,
+        spec: ReviewSpec,
+        path: str,
+        content: str,
+        message: str,
+        base_sha: str | None,
+        credential: str,
+        context: RequestContext,
+    ) -> dict[str, Any]:
+        quoted_path = _quote_path(path)
+
+        # Step 1: GET /repos/{repo}/git/ref/heads/{base} -> .object.sha
+        try:
+            ref_data = self._request(
+                spec,
+                "GET",
+                f"/repos/{spec.repo}/git/ref/heads/{spec.base_branch}",
+                credential,
+            )
+        except ReviewBackendError as exc:
+            if exc.status == 404:
+                raise ReviewBackendError(
+                    f"corpus repository {spec.repo!r} has no commits yet on branch {spec.base_branch!r}",
+                    status=404,
+                ) from exc
+            raise
+
+        base_head_sha = ref_data.get("object", {}).get("sha") if isinstance(ref_data, dict) else None
+        if not base_head_sha:
+            raise ReviewBackendError("review host returned ref without object.sha")
+
+        # Step 2: POST /repos/{repo}/git/refs with {"ref": "refs/heads/<branch>", "sha": <base sha>}
+        branch = _derive_branch(path)
+        self._request(
+            spec,
+            "POST",
+            f"/repos/{spec.repo}/git/refs",
+            credential,
+            body={"ref": f"refs/heads/{branch}", "sha": base_head_sha},
+        )
+
+        # Step 3: PUT /repos/{repo}/contents/{path}
+        b64_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        put_body: dict[str, Any] = {
+            "message": message,
+            "branch": branch,
+            "content": b64_content,
+        }
+        if base_sha is not None:
+            put_body["sha"] = base_sha
+
+        try:
+            self._request(
+                spec,
+                "PUT",
+                f"/repos/{spec.repo}/contents/{quoted_path}",
+                credential,
+                body=put_body,
+            )
+        except ReviewBackendError as exc:
+            if base_sha is None and exc.status == 422:
+                raise ReviewBackendError(
+                    f"document already exists: {path!r}",
+                    status=409,
+                ) from exc
+            if base_sha is not None and exc.status == 409:
+                raise ReviewBackendError(
+                    f"document changed since it was read: {path!r}",
+                    status=409,
+                ) from exc
+            raise
+
+        # Step 4: POST /repos/{repo}/pulls with {"title", "head", "base", "body"} -> .number, .html_url
+        lines = message.strip().splitlines()
+        title = lines[0].strip() if lines else path
+        pr_body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+
+        pr_data = self._request(
+            spec,
+            "POST",
+            f"/repos/{spec.repo}/pulls",
+            credential,
+            body={
+                "title": title,
+                "head": branch,
+                "base": spec.base_branch,
+                "body": pr_body,
+            },
+        )
+        if not isinstance(pr_data, dict) or "number" not in pr_data or "html_url" not in pr_data:
+            raise ReviewBackendError("review host returned invalid pull request response")
+        return {
+            "number": pr_data["number"],
+            "url": pr_data["html_url"],
+            "branch": branch,
+        }
+
+    def open_change(
+        self,
+        spec: ReviewSpec,
+        path: str,
+        content: str,
+        message: str,
+        credential: str,
+        context: RequestContext,
+    ) -> dict[str, Any]:
+        return self._propose(spec, path, content, message, None, credential, context)
+
+    def update_change(
+        self,
+        spec: ReviewSpec,
+        path: str,
+        content: str,
+        message: str,
+        base_sha: str,
+        credential: str,
+        context: RequestContext,
+    ) -> dict[str, Any]:
+        if not isinstance(base_sha, str) or not base_sha.strip():
+            raise ReviewBackendError("base_sha is required for update_change", status=400)
+        return self._propose(spec, path, content, message, base_sha.strip(), credential, context)
+
+    def comment(
+        self,
+        spec: ReviewSpec,
+        change_ref: int,
+        body: str,
+        credential: str,
+        context: RequestContext,
+    ) -> dict[str, Any]:
+        _validate_change_ref(change_ref)
+        res = self._request(
+            spec,
+            "POST",
+            f"/repos/{spec.repo}/issues/{change_ref}/comments",
+            credential,
+            body={"body": body},
+        )
+        return res if isinstance(res, dict) else {}
+
+    def get_change(
+        self,
+        spec: ReviewSpec,
+        change_ref: int,
+        credential: str,
+        context: RequestContext,
+    ) -> dict[str, Any]:
+        _validate_change_ref(change_ref)
+        data = self._request(
+            spec,
+            "GET",
+            f"/repos/{spec.repo}/pulls/{change_ref}",
+            credential,
+        )
+        if not isinstance(data, dict):
+            raise ReviewBackendError("review host returned invalid pull request response")
+        head = data.get("head") or {}
+        branch = head.get("ref", "") if isinstance(head, dict) else ""
+        return {
+            "number": data.get("number", change_ref),
+            "state": data.get("state", ""),
+            "title": data.get("title", ""),
+            "url": data.get("html_url", ""),
+            "merged": bool(data.get("merged", False)),
+            "branch": branch,
+        }
+
