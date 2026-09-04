@@ -16,14 +16,16 @@ scripted fake (see `tests/`), so you can add or change a backend without a live
 instance.
 
 **Python 3.11 or newer, and `git` on `PATH`.** The docs-corpus tests build real
-git repositories as fixtures, so a `git` older than the suite expects fails
-every test in `tests/test_docs_backend.py` inside `setUp` rather than as an
-assertion — if you see that, check `git --version` before anything else. The
-fixtures stay on flags old enough not to need a recent one; if you add a fixture
-that needs a newer flag, prefer the portable spelling, because the gateway
-itself only uses `clone`, `fetch`, `ls-tree`, `cat-file`, `remote`, `reset` and
-`rev-parse`, and a test suite that demands more than the code does is a
-portability bug in the suite.
+git repositories as fixtures. The whole suite is verified green on **git
+2.25.1** (Ubuntu 20.04's) as well as on 2.34 and 2.55; the gateway itself uses
+only `clone`, `fetch`, `ls-tree`, `cat-file`, `remote`, `reset` and `rev-parse`.
+
+If you add a fixture, prefer the spelling that works on an old git — there is a
+test that greps this suite for `git init -b` and fails, because a fixture
+demanding a newer git than the code under test is a portability bug in the
+suite, and one is invisible from a machine whose git is new enough. It presents
+as every test in `tests/test_docs_backend.py` failing inside `setUp` with no
+assertion message, so if you see that, check `git --version` first.
 
 ## Ground rules
 
