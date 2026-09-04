@@ -176,6 +176,27 @@ def stamped(body: str, context: RequestContext) -> str:
     return f"{body.rstrip()}\n\n{FOOTER.format(actor=context.actor, request_id=context.request_id)}"
 
 
+# Printable ASCII only. A credential is going into an HTTP header, and
+# `http.client.putheader` raises a ValueError whose message CONTAINS THE HEADER
+# VALUE when it cannot -- which this module then chains as `__cause__`, so a
+# stored credential carrying a CR, LF or NUL would appear verbatim in any
+# formatted traceback. Nothing formats one today; this is one `logger.exception`
+# away from being a credential in the logs, and the check costs nothing.
+_HEADER_SAFE_RE = re.compile(r"\A[\x21-\x7e]+\Z")
+
+
+def _require_usable_credential(credential: Any) -> str:
+    if not isinstance(credential, str) or not _HEADER_SAFE_RE.match(credential):
+        # Deliberately no `from exc` and no echo of the value: the whole point is
+        # that this one never carries the credential anywhere.
+        raise ReviewBackendError(
+            "the stored credential for this review host is not usable as an HTTP header "
+            "(it contains whitespace or a control character); re-enroll it",
+            status=409,
+        )
+    return credential
+
+
 def _validate_change_ref(change_ref: Any) -> int:
     """Validate that change_ref is a positive integer before using in URL segments."""
     if isinstance(change_ref, bool) or not isinstance(change_ref, int) or change_ref <= 0:
@@ -225,6 +246,7 @@ class GitHubReviewBackend:
         body: dict[str, Any] | None = None,
     ) -> Any:
         url = f"{spec.api.rstrip('/')}{path}"
+        credential = _require_usable_credential(credential)
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {credential}",

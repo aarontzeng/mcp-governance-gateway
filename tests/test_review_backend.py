@@ -402,3 +402,47 @@ class GitHubReviewBackendTests(unittest.TestCase):
                     with self.assertRaises(ReviewBackendError) as cm:
                         backend._request(self.spec, "GET", "/path", "tok")
                     self.assertIn("unavailable", str(cm.exception))
+
+
+class CredentialHygieneTests(unittest.TestCase):
+    """A credential that cannot be an HTTP header must not reach one.
+
+    `http.client.putheader` raises a ValueError whose message CONTAINS the header
+    value, and this module chains its causes -- so a stored credential carrying a
+    CR, LF or NUL appeared verbatim in any formatted traceback. Nothing formats
+    one today, which made it one `logger.exception` away rather than a live leak.
+    (Found by review, 2026-09-04.)
+    """
+
+    def _backend(self):
+        return GitHubReviewBackend(timeout_sec=1)
+
+    def _spec(self):
+        return ReviewSpec(project="p", type="github", repo="o/r",
+                          api="https://api.github.com", base_branch="main")
+
+    def _ctx(self):
+        return RequestContext(actor="1", project="p", client="t", request_id="r")
+
+    def test_a_credential_with_a_control_character_never_reaches_a_traceback(self):
+        import traceback
+        for bad in ("abc\r\nX-Injected: SUPERSECRET", "tok\x00en", "with space", "", "tab\there"):
+            with self.assertRaises(ReviewBackendError) as caught:
+                self._backend().get_change(self._spec(), 1, bad, self._ctx())
+            self.assertEqual(caught.exception.status, 409)
+            try:
+                raise caught.exception
+            except ReviewBackendError:
+                rendered = traceback.format_exc()
+            self.assertNotIn("SUPERSECRET", rendered)
+            if bad:   # "" is a substring of everything; the point is the value is not echoed
+                self.assertNotIn(bad, str(caught.exception))
+                self.assertNotIn(bad, rendered)
+
+    def test_the_refusal_says_what_is_wrong_rather_than_blaming_the_network(self):
+        # It surfaced as "review host unavailable", which sends an operator to
+        # look at connectivity for what is a corrupt stored credential.
+        with self.assertRaises(ReviewBackendError) as caught:
+            self._backend().get_change(self._spec(), 1, "bad\ncred", self._ctx())
+        self.assertIn("re-enroll", str(caught.exception))
+        self.assertNotIn("unavailable", str(caught.exception))

@@ -101,14 +101,25 @@ class DocsReviewService:
         better phishing lure than a Markdown file, sitting behind a tool whose
         name says "docs".
 
-        The rule is exactly the read path's own filter (`_load_docs`): under one
-        of the served directories, ending in `.md`, and no dot-prefixed segment.
-        Keeping them identical is the point -- a document you could propose but
-        never read back would be a strange thing to be able to make.
+        The rule is the read path's own filter (`_load_docs`): under one of the
+        served directories, ending in `.md`, and no dot-prefixed segment. Not
+        literally the same code -- the read path walks `PurePosixPath(rel).parts`,
+        which silently drops a `.` component and collapses `//`, while this walks
+        `split("/")` and rejects both. The divergence is deliberate in that
+        direction: the WRITE path is the stricter of the two, so anything it
+        accepts the read path would serve, which is the property that matters. A
+        document you could propose but never read back would be a strange thing
+        to be able to make.
+
+        Control characters are rejected outright. A NUL in a path survived both
+        this check and the URL quoting (as `%00`) before it was added; git's own
+        tree rules make it inert, but "inert because something downstream refuses
+        it" is not a validation story.
         """
         served = getattr(self._corpus, "SERVED_DIRS", ("raw/", "wiki/"))
         parts = path.split("/")
         if (not path.startswith(tuple(served)) or not path.endswith(".md")
+                or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in path)
                 or any(part.startswith(".") or not part for part in parts)):
             raise ReviewBackendError(
                 f"documents live under {' or '.join(served)} and end in .md; {path!r} does not, "

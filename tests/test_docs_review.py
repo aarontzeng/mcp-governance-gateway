@@ -117,6 +117,18 @@ class PathTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, 400, path)
         self.assertEqual(backend.calls, [])
 
+    def test_a_control_character_in_a_path_is_refused(self):
+        # A NUL survived both this check and the URL quoting (as %00) until a
+        # review found it. Git's own tree rules make it inert, but "inert because
+        # something downstream refuses it" is not a validation story.
+        service, backend = _service()
+        for path in ("raw/x\x00.md", "raw/\x00foo/bar/x.md", "wiki/a\tb.md",
+                     "wiki/a\nb.md", "wiki/a\x7f.md"):
+            with self.assertRaises(ReviewBackendError, msg=repr(path)) as caught:
+                service.create(path, "b", "m", _ctx())
+            self.assertEqual(caught.exception.status, 400, repr(path))
+        self.assertEqual(backend.calls, [])
+
     def test_the_documents_it_does_allow_are_exactly_the_ones_it_serves(self):
         service, backend = _service()
         for path in ("wiki/onboarding.md", "raw/reports/2026-01-01-x.md"):
