@@ -38,6 +38,12 @@ token authenticating. Writes to it must be atomic.
 Minting is out of scope for this project. What it requires of a minter is the
 above: a verified immutable id, and an atomic write.
 
+**Amended by [ADR-0016](ADR-0016-oidc-as-a-second-authenticator.md) (2026-09-04):**
+an OIDC access token is exactly the signed assertion this ADR describes, so the
+gateway now verifies one directly and takes `sub` as the actor. Tenancy still
+does not come from the token — an IdP knows who someone is, not which project of
+this gateway they may act in.
+
 ## Alternatives Considered
 
 ### Keep shared per-project tokens

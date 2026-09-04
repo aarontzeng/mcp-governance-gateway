@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Tenancy for OIDC-authenticated callers. The IdP says who someone is; this",
+    "file says which project of this gateway they may act in. A subject that",
+    "matches nothing here is authenticated but has no project, and every tool is",
+    "then denied -- the fail-closed direction.",
+    "Resolution order: `subjects` first, then `groups`. Several groups are merged",
+    "only when they name the SAME project; two projects are refused rather than",
+    "resolved, because picking one would make a tenant boundary depend on order."
+  ],
+  "subjects": {
+    "f4c1b0e2-0000-4a1b-9c3d-000000000001": {
+      "project": "demo-project",
+      "issue_project": "demo",
+      "roles": ["issue_writer"]
+    }
+  },
+  "groups": {
+    "mcp-demo-readers": { "project": "demo-project", "roles": [] },
+    "mcp-demo-writers": { "project": "demo-project", "roles": ["issue_writer"] }
+  }
+}

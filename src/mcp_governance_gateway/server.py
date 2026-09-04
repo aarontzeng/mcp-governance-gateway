@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse, urlsplit
 from .audit import AuditEvent, AuditSink, JsonLinesAuditSink
 from .auth import AuthError, BearerTokenAuthenticator, IdentityVerifier
 from .config import Settings
+from .oidc import CompositeAuthenticator, GrantsFile, JwksCache, OidcAuthenticator, discover_jwks_url
 from .ci_backend import CiBackendError, JenkinsHttpBackend, STREAM_CHUNK, load_ci_jobs
 from .docs_backend import DocsCorpus, load_docs_repos
 from .internal_api import InternalApi
@@ -396,13 +397,46 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+def _with_oidc(tokens: BearerTokenAuthenticator, settings: Settings):
+    """Wrap the token authenticator so OIDC answers what the token file does not.
+
+    Fail-loud at boot: an unreachable IdP here means discovery failed, and a
+    gateway that started anyway would answer 401 to every OIDC caller with
+    nothing in the log saying why. The JWKS fetch itself is deliberately NOT
+    forced at boot -- once running, an IdP outage keeps the last-good keys
+    rather than locking everyone out (oidc.JwksCache).
+    """
+    if not settings.oidc_enabled:
+        return tokens
+    jwks_url = settings.oidc_jwks_url or discover_jwks_url(settings.oidc_issuer)
+    oidc = OidcAuthenticator(
+        issuer=settings.oidc_issuer,
+        audience=settings.oidc_audience,
+        jwks=JwksCache(jwks_url, ttl_sec=settings.oidc_jwks_ttl_sec),
+        grants=GrantsFile(settings.oidc_grants_file),
+        clock_skew_sec=settings.oidc_clock_skew_sec,
+        groups_claim=settings.oidc_groups_claim,
+        required_scope=settings.oidc_required_scope,
+    )
+    print(f"OIDC enabled: issuer={settings.oidc_issuer} audience={settings.oidc_audience} "
+          f"jwks={jwks_url}", file=sys.stderr, flush=True)
+    return CompositeAuthenticator(tokens, oidc)
+
+
 def build_server(settings: Settings) -> GatewayHTTPServer:
     request.install_opener(request.build_opener(SameOriginRedirects))
-    token_sources: list[tuple[str, bool]] = [(settings.token_file, True)]
+    token_sources: list[tuple[str, bool]] = []
+    if settings.token_file:
+        token_sources.append((settings.token_file, True))
     if settings.user_token_file:
         # optional, runtime-managed per-user token store (may be absent/empty); hot-reloaded
         token_sources.append((settings.user_token_file, False))
-    authenticator = BearerTokenAuthenticator.from_files(token_sources)
+    # A deployment whose identities all come from an IdP legitimately has no
+    # opaque tokens; an empty authenticator refuses every bearer, which is what
+    # the OIDC path is then there to answer.
+    authenticator = BearerTokenAuthenticator.from_files(token_sources) if token_sources \
+        else BearerTokenAuthenticator({})
+    authenticator = _with_oidc(authenticator, settings)
     actor_labels = ActorLabels(settings.user_token_file)
     memory_backend = HttpMemoryBackend(
         base_url=settings.memory_base_url,

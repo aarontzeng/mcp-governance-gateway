@@ -10,7 +10,9 @@ from urllib.parse import urlsplit
 class Settings:
     host: str
     port: int
-    token_file: str
+    # Optional only when OIDC is configured (see from_env): a deployment whose
+    # identities all come from an IdP has no opaque tokens to store.
+    token_file: str | None
     allowed_origins: tuple[str, ...]
     memory_base_url: str
     memory_backend_token: str | None
@@ -49,6 +51,20 @@ class Settings:
     # (the front gateway IDENTITY_CLAIMS_SECRET). Empty disables propagation.
     identity_claims_secret: str | None = None
     identity_header_prefix: str = "X-Forwarded-User"
+    # OIDC (ADR-0016): a second authenticator beside the token file, not a
+    # replacement for it. Unset issuer -> the mode does not exist and nothing
+    # about 0.1.0 behaviour changes. Audience has no default on purpose: an
+    # issuer mints tokens for many audiences and accepting all of them would let
+    # a token issued for an unrelated client act here. Tenancy comes from the
+    # grants file, never from a claim the IdP controls.
+    oidc_issuer: str | None = None
+    oidc_audience: str | None = None
+    oidc_jwks_url: str | None = None          # unset -> discovered from the issuer
+    oidc_grants_file: str | None = None
+    oidc_clock_skew_sec: int = 60
+    oidc_jwks_ttl_sec: int = 600
+    oidc_groups_claim: str = "groups"
+    oidc_required_scope: str | None = None
     # Docs corpus (read-only docs.search/docs.get over per-project docs repos).
     # Enabled only when both are set; docs_repos_file maps project -> {url, branch}.
     docs_repos_file: str | None = None
@@ -59,7 +75,8 @@ class Settings:
     # re-enroll a key, so the message can point somewhere instead of describing
     # an endpoint the user has to go find. Unset -> those errors carry no URL.
     credential_portal_url: str | None = None
-    # Jenkins CI (read-only ci.status/ci.log). Enabled when url + jobs file are set.
+    # Jenkins CI (read-only ci.status/ci.builds/ci.log/ci.artifact). Enabled when
+    # url + jobs file are set.
     jenkins_base_url: str | None = None
     jenkins_user: str | None = None
     jenkins_token: str | None = None
@@ -76,11 +93,29 @@ class Settings:
     # "/ci/artifact?..." reference the caller prepends its own origin to.
     ci_artifact_base_url: str | None = None
 
+    @property
+    def oidc_enabled(self) -> bool:
+        return bool(self.oidc_issuer)
+
     @classmethod
     def from_env(cls) -> "Settings":
+        oidc_issuer = _url_env("OIDC_ISSUER")
+        oidc_audience = os.environ.get("OIDC_AUDIENCE") or None
+        oidc_grants_file = os.environ.get("OIDC_GRANTS_FILE") or None
+        # Half-configured OIDC is refused at boot rather than silently disabled:
+        # an operator who set two of the three variables believes the mode is on,
+        # and a gateway that quietly ignored them would authenticate nobody by a
+        # route they think exists.
+        if oidc_issuer and not (oidc_audience and oidc_grants_file):
+            raise ValueError("OIDC_ISSUER needs OIDC_AUDIENCE and OIDC_GRANTS_FILE")
+        if not oidc_issuer and (oidc_audience or oidc_grants_file or os.environ.get("OIDC_JWKS_URL")):
+            raise ValueError("OIDC_AUDIENCE / OIDC_GRANTS_FILE / OIDC_JWKS_URL need OIDC_ISSUER")
+
         token_file = os.environ.get("GATEWAY_TOKEN_FILE")
-        if not token_file:
-            raise ValueError("GATEWAY_TOKEN_FILE is required")
+        if not token_file and not oidc_issuer:
+            # Still required in the default deployment; optional only when OIDC is
+            # configured, because then there may legitimately be no opaque tokens.
+            raise ValueError("GATEWAY_TOKEN_FILE is required (or configure OIDC_ISSUER)")
 
         return cls(
             host=os.environ.get("GATEWAY_HOST", "127.0.0.1"),
@@ -112,6 +147,14 @@ class Settings:
             gitlab_timeout_sec=_timeout_env("GITLAB_TIMEOUT_SEC"),
             gitlab_enforce_personal_key=_bool_env("GITLAB_ENFORCE_PERSONAL_KEY"),
             credential_portal_url=os.environ.get("CREDENTIAL_PORTAL_URL") or None,
+            oidc_issuer=oidc_issuer,
+            oidc_audience=oidc_audience,
+            oidc_jwks_url=_url_env("OIDC_JWKS_URL"),
+            oidc_grants_file=oidc_grants_file,
+            oidc_clock_skew_sec=_int_env("OIDC_CLOCK_SKEW_SEC", 60, minimum=0),
+            oidc_jwks_ttl_sec=_int_env("OIDC_JWKS_TTL_SEC", 600, minimum=1),
+            oidc_groups_claim=os.environ.get("OIDC_GROUPS_CLAIM", "groups"),
+            oidc_required_scope=os.environ.get("OIDC_REQUIRED_SCOPE") or None,
             identity_claims_secret=os.environ.get("IDENTITY_CLAIMS_SECRET") or None,
             identity_header_prefix=os.environ.get("IDENTITY_HEADER_PREFIX", "X-Forwarded-User"),
             docs_repos_file=os.environ.get("DOCS_REPOS_FILE") or None,

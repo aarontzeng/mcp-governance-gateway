@@ -8,6 +8,19 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **OIDC access-token verification (ADR-0016)** — an optional second
+  authenticator beside the token file, so a deployment with an identity
+  provider mints nothing by hand. The token file is consulted first, and a
+  deployment that sets no `OIDC_*` variables behaves exactly as before;
+  `GATEWAY_TOKEN_FILE` becomes optional only when `OIDC_ISSUER` is set. The
+  IdP supplies the identity (`sub` → actor, `email` as a label); tenancy comes
+  from `OIDC_GRANTS_FILE`, resolved by subject then by group, so a `project`
+  claim inside a token is ignored. Signature algorithms are an allow-list in
+  code — `alg: none` and every HMAC algorithm are refused before a key lookup —
+  and `OIDC_AUDIENCE` is required with no default. The key set is cached, with
+  last-good kept across an IdP outage. No new dependency: `cryptography` was
+  already required.
+
 - `ci.builds` — recent build history, newest first (1–50 rows per job, default
   10). `ci.status` reports the last build only, which cannot distinguish a job
   failing since a known build from one that fails intermittently. `job` is

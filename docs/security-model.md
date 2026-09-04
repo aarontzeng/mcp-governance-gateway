@@ -7,8 +7,8 @@
 >
 > | Specified here | Implemented in this release |
 > |---|---|
-> | OIDC/OAuth with the gateway as resource server | **No.** Authentication is an opaque bearer string resolved against a token file. |
-> | Audience-bound tokens, `aud`/`exp` validation | **No.** There are no claims in the token to validate; scoping lives server-side. |
+> | OIDC/OAuth with the gateway as resource server | **Yes, optionally** (ADR-0016). An opaque bearer resolved against the token file is still the default and is tried first; a bearer the file does not know is verified as an OIDC access token when `OIDC_ISSUER` is set. |
+> | Audience-bound tokens, `aud`/`exp` validation | **For OIDC tokens, yes** — `iss`, `aud`, `exp`, `nbf`/`iat` and an algorithm allow-list, with `OIDC_AUDIENCE` required and no default. For opaque tokens there are still no claims to validate; scoping lives server-side. |
 > | Signed assertions with `iss`/`aud`/`exp`/`jti` and an asymmetric key | **Partly.** Identity propagation verifies an HMAC over `user_id:email` only — no issuer, audience, expiry or replay id, and a missing header falls back to the token's own actor. Treat it as an attribution override, not an authentication hop. |
 > | Role-based authorization per project | **Partly.** See "Authorization as implemented" below. |
 >
@@ -50,8 +50,31 @@ project token.
 
 ## Authentication
 
-MVP can use short-lived per-user gateway tokens for a private pilot. Production
-should use OIDC/OAuth with the gateway as the MCP resource server.
+Two authenticators may run at once, and the **token file is consulted first**.
+A bearer it does not know is then verified as an OIDC access token when
+`OIDC_ISSUER` is configured (ADR-0016). That order is deliberate: an
+operator-issued token stays authoritative, and a JWT can never shadow an entry
+in the file.
+
+The OIDC path takes only the identity. `sub` becomes the actor — the verified,
+immutable id ADR-0007 asks a minter for — and `email` stays a display label.
+`project`, `issue_project` and `roles` come from a grants file **this
+deployment owns**, resolved by subject and then by group; a `project` claim
+inside a token is ignored, so the tenant boundary never becomes a function of
+somebody else's IdP client configuration. A subject with no grant is
+authenticated and has no project, which every tool then denies.
+
+Two verification rules do not bend: the signature algorithm comes from an
+allow-list in code (`alg: none` and every HMAC algorithm are refused *before* a
+key is looked up, because a JWKS publishes public keys), and the audience is
+checked against a required `OIDC_AUDIENCE` with no default. A half-configured
+OIDC block is refused at boot rather than silently disabled.
+
+An IdP outage keeps the last-good key set rather than revoking everyone, the
+same posture the token file's hot reload already takes.
+
+Where no IdP is available, short-lived per-user gateway tokens remain the
+supported path.
 
 Gateway tokens must be audience-bound to the gateway endpoint. Tokens issued for
 other resources must be rejected.

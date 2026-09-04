@@ -47,7 +47,11 @@ field, and errors never leak the existence of another tenant's data.
 ## Security model in one paragraph
 
 A bearer token is an opaque handle resolved server-side to a set of claims
-(`project`, `issue_project`, `actor`, `roles`). The token string is still a
+(`project`, `issue_project`, `actor`, `roles`). Optionally the gateway also
+verifies **OIDC** access tokens from an IdP you configure (ADR-0016): the
+signed `sub` becomes the actor, so nothing has to be minted by hand, while
+tenancy still comes from a grants file this deployment owns — an IdP knows who
+someone is, not which project of this gateway they may act in. The token string is still a
 secret — whoever holds it acts as that principal — but it encodes nothing, so
 the claims live on the server and renaming or re-scoping them needs no token
 re-mint. Writes additionally require a writer role
@@ -68,6 +72,16 @@ pip install .
 export GATEWAY_TOKEN_FILE=/etc/mcp-governance-gateway/tokens.json   # project -> claims
 export MEMORY_BASE_URL=http://127.0.0.1:3111
 mcp-governance-gateway                              # serves MCP on :8080/mcp
+```
+
+Already run an identity provider? Point the gateway at it and skip the token
+file entirely — the IdP becomes the minter ADR-0007 asks for, and onboarding a
+person is one line in the grants file:
+
+```bash
+export OIDC_ISSUER=https://sso.example.internal/realms/main
+export OIDC_AUDIENCE=mcp-governance-gateway
+export OIDC_GRANTS_FILE=/etc/mcp-governance-gateway/oidc-grants.json
 ```
 
 Enable more backends by setting their environment variables (see
