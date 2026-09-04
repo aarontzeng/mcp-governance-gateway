@@ -216,7 +216,10 @@ class GatewayApp:
             self._audit(name, principal, gateway_request_id, decision, "confirm_required", start=start)
             return _result(request_id, _tool_result(result))
 
-        resource_id = result.get("id") if isinstance(result, dict) else None
+        # `id` for the backends that create a numbered thing; `queueItem` for
+        # ci.rerun, whose queue item IS what the call created. Without the second
+        # key a build trigger was audited with no handle on what it triggered.
+        resource_id = (result.get("id") or result.get("queueItem")) if isinstance(result, dict) else None
         self._audit(
             name, principal, gateway_request_id, decision, "ok",
             start=start, backend_status="ok", resource_id=resource_id,
@@ -423,9 +426,14 @@ class GatewayApp:
             return self._ci_backend.artifacts(job, context, build)
         if name == "ci.rerun":
             job = _required_text(arguments, "job", max_len=200)
-            # The gate before the side effect, as issues.create does: a rerun that
-            # started a build and THEN asked for confirmation would have spent the
-            # thing the confirmation exists to protect.
+            # Allowlist FIRST, then the confirmation. Minting a nonce for a job
+            # this project may not start would ask someone to confirm an action
+            # that is going to 404, and would make "three gates" untrue of the
+            # first call -- it would check the role and nothing else.
+            self._ci_backend.require_triggerable(job, context)
+            # Then the gate, before the side effect, as issues.create does: a
+            # rerun that started a build and THEN asked for confirmation would
+            # have spent the thing the confirmation exists to protect.
             pending = self._confirmation_gate(
                 name, {"job": job}, arguments, principal, f"Start a CI build of {job!r}")
             if pending is not None:

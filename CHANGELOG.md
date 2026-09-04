@@ -49,7 +49,9 @@ All notable changes to this project are recorded here. The format follows
   **queue item**, not a build number, because the build does not exist until
   Jenkins's quiet period elapses; two reruns inside that window are coalesced
   into one build, which `alreadyQueued` reports rather than pretending
-  otherwise. `JENKINS_TOKEN` must be an API token: Jenkins exempts those from
+  otherwise — three-valued, because `true` is the only certain answer and
+  rounding "could not tell" down to `false` is what makes an agent wait for a
+  build that never arrives. `JENKINS_TOKEN` must be an API token: Jenkins exempts those from
   CSRF and refuses a password POST without a session-bound crumb, and a 403 now
   says so instead of reading as a permissions problem.
 

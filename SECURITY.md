@@ -113,6 +113,17 @@ one: a prepare on A cannot commit on B, quotas multiply by the instance count,
 and concurrent credential enrollment can lose a record. Run one active instance
 until that state moves to shared storage.
 
+Worth stating more sharply than "can lose a record", because one case is
+fail-OPEN rather than fail-safe: the credential store's read-modify-write is
+serialized by a `threading.Lock` on the instance, not by a lock on the FILE. Two
+processes sharing one store can therefore interleave so that an enrolment
+already in flight rewrites a record a `DELETE /internal/credentials` just
+removed — the delete returns `{"cleared": true}` and audits `ok`, and the
+credential is live again a moment later. A revocation that reports success and
+does not stick is the reason the offboarding order in `docs/operations.md`
+assumes the single active instance this section requires. (Demonstrated in
+review, 2026-09-04.)
+
 **"Last good" applies to authorization state too.** A token file that becomes
 unreadable leaves the previously loaded claims live, so an emergency revoke that
 corrupts or truncates the file may not take effect. Verify a revoke by observing a

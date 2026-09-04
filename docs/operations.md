@@ -127,7 +127,12 @@ In this order, so no window leaves a live credential without a live audit trail:
 
 1. `DELETE /internal/credentials` as that user, **or** clear their record from
    the credential store — the encrypted key is the thing that still works after
-   their gateway token is gone.
+   their gateway token is gone. This step assumes **one active instance**, which
+   the gateway requires anyway: the store's read-modify-write is serialized
+   in-process, so a second instance mid-enrolment can rewrite the record this
+   removed, and the delete would report success either way
+   ([SECURITY.md](../SECURITY.md#known-limitations)). Confirm the record is gone
+   rather than trusting the `{"cleared": true}`.
 2. Revoke the gateway token: `mcpgw-admin revoke --actor <id> --project <p>`, or
    remove the entry from the static store. The gateway reloads on file change;
    a corrupt file keeps the last-good set and says so on stderr, so **confirm

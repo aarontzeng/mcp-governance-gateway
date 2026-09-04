@@ -155,6 +155,22 @@ _NEVER_BUILT = {"build": None, "result": "UNKNOWN", "building": False,
                 "timestamp": None, "startedAt": None, "durationMs": None}
 
 
+def _already_queued(queue_id: int | None, before: set[int] | None) -> bool | None:
+    """Whether Jenkins handed back a queue item it was already holding.
+
+    Three-valued on purpose. `True` is the only certain answer: the id existed
+    before the trigger, so this call added nothing. `False` means only that we
+    did not observe it beforehand -- another client can queue the same job
+    between the read and the POST, and then a coalesced trigger looks new. `None`
+    means the queue could not be read at all. Collapsing the last two into
+    `False` is what makes an agent wait for a distinct build that will never
+    arrive, which is the failure this field exists to prevent.
+    """
+    if before is None or queue_id is None:
+        return None
+    return queue_id in before
+
+
 def _queue_id_from(location: str | None) -> int | None:
     """The trailing id of `.../queue/item/<n>/`. A Location we cannot parse is a
     missing hint, not an error: the build was still queued."""
@@ -328,7 +344,7 @@ class JenkinsHttpBackend:
         parameterised trigger takes caller-supplied values into a build, which is
         a different trust surface and stays out (`docs/roadmap.md`).
         """
-        name = self._require_triggerable(job, context)
+        name = self.require_triggerable(job, context)
         before = self._queue_ids()
         location = self._post(f"/job/{parse.quote(name, safe='')}/build")
         queue_id = _queue_id_from(location)
@@ -336,7 +352,7 @@ class JenkinsHttpBackend:
             "job": name,
             "queueItem": queue_id,
             "queueUrl": location or None,
-            "alreadyQueued": queue_id is not None and queue_id in before,
+            "alreadyQueued": _already_queued(queue_id, before),
         }
 
     def artifacts(self, job: str, context: RequestContext, build: object = None) -> dict[str, Any]:
@@ -393,7 +409,7 @@ class JenkinsHttpBackend:
 
     # --- internals -----------------------------------------------------
 
-    def _require_triggerable(self, job: str, context: RequestContext) -> str:
+    def require_triggerable(self, job: str, context: RequestContext) -> str:
         """Membership of the TRIGGER allowlist, with the read allowlist's own
         answer for anything else: a job an agent may watch but not start is
         "unknown" here, exactly as a job in another project is."""
@@ -405,17 +421,20 @@ class JenkinsHttpBackend:
             raise CiBackendError("unknown job for this project", status=404)
         return name
 
-    def _queue_ids(self) -> set[int]:
-        """The queue item ids Jenkins is already holding, so a coalesced trigger
-        can be reported as such. Best effort: a queue read that fails must not
-        fail the trigger, it only costs the `alreadyQueued` hint."""
+    def _queue_ids(self) -> set[int] | None:
+        """The queue item ids Jenkins is already holding, or None if we could not
+        look. A queue read that fails must not fail the trigger -- it costs the
+        `alreadyQueued` answer, and None is how that is said out loud rather
+        than being rounded down to "not already queued"."""
         try:
             data = self._request_json("/queue/api/json?tree=items[id]")
         except CiBackendError:
-            return set()
+            return None
         items = data.get("items")
         return {i["id"] for i in items if isinstance(i, dict) and isinstance(i.get("id"), int)} \
             if isinstance(items, list) else set()
+
+
 
     def _post(self, path: str) -> str | None:
         """POST with no body, returning the `Location` header.

@@ -604,6 +604,11 @@ class RerunTests(unittest.TestCase):
         self.assertNotIn("build", out)
         self.assertEqual(fake.posts, ["/job/swarm-build/build"])
 
+    def test_an_uncoalesced_rerun_reports_false_only_when_the_queue_was_read(self):
+        import json as _json
+        fake = self._fake(replies={"/queue/api/json": _json.dumps({"items": []}).encode()})
+        self.assertIs(fake.rerun("swarm-build", _ctx())["alreadyQueued"], False)
+
     def test_a_coalesced_rerun_says_so_rather_than_claiming_a_new_build(self):
         # Measured against 2.531: two triggers inside the quiet period return the
         # same queue item and produce ONE build. Reporting the second as a fresh
@@ -612,11 +617,31 @@ class RerunTests(unittest.TestCase):
         fake = self._fake(replies={"/queue/api/json": _json.dumps({"items": [{"id": 7}]}).encode()})
         self.assertTrue(fake.rerun("swarm-build", _ctx())["alreadyQueued"])
 
-    def test_a_queue_read_that_fails_costs_the_hint_not_the_trigger(self):
+    def test_a_queue_read_that_fails_says_unknown_rather_than_not_queued(self):
+        # This test used to assert False, which PINNED a lie: a coalesced trigger
+        # we could not observe is not a new build. False is a claim; None is the
+        # truth when the queue could not be read. (Review, 2026-09-04.)
         fake = self._fake(replies={"/queue/api/json": CiBackendError("CI HTTP 500", status=500)})
         out = fake.rerun("swarm-build", _ctx())
         self.assertEqual(out["queueItem"], 7)
-        self.assertFalse(out["alreadyQueued"])
+        self.assertIsNone(out["alreadyQueued"])
+
+    def test_an_unparseable_location_also_makes_the_answer_unknown(self):
+        fake = self._fake(replies={"POST": "not a url"})
+        self.assertIsNone(fake.rerun("swarm-build", _ctx())["alreadyQueued"])
+
+    def test_a_job_off_the_trigger_list_is_refused_before_a_confirmation_is_minted(self):
+        # Minting a nonce for a job this project cannot start would ask someone to
+        # confirm an action that is going to 404, and would make the first call a
+        # role check and nothing else.
+        import json as _json
+        app = GatewayApp(memory_backend=_NullMemory(), audit_sink=_ListAudit(),
+                         ci_backend=FakeJenkins(trigger_jobs={"proj-a": ["swarm-build"]}))
+        runner = Principal(actor="9", project="proj-a", roles=("ci_runner",), token_id="t9")
+        resp = app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": "ci.rerun", "arguments": {"job": "swarm-lint"}}}, runner)
+        self.assertTrue(resp["result"].get("isError"))
+        self.assertNotIn("confirmationId", _json.dumps(resp))
 
     def test_a_location_that_cannot_be_parsed_is_a_missing_hint_not_an_error(self):
         for location in (None, "", "https://jenkins.example/queue/", "not a url"):

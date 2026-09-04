@@ -25,6 +25,10 @@ same 404 a foreign job gets.
 | `ci.builds` | `job` (**optional** — omitted means every job in the project), `count` (1–50, default 10) | `{jobs[] {job,builds[] {build,result,building,timestamp,startedAt,durationMs},count},count}`, newest first |
 | `ci.log` | `job`, `lines` (1–1000, default 200) | last-build console tail `{job,build,result,lines[],truncated}` |
 | `ci.rerun` | `job`, `confirm` | `{job,queueItem,queueUrl,alreadyQueued}` — **confirmation-gated**, needs the `ci_runner` role and the trigger allowlist |
+
+`alreadyQueued` is three-valued. `true` is the only certain answer: the queue item existed before the trigger, so this call added nothing. `false` means only that it was not seen beforehand — another client can queue the same job in the window between the read and the trigger. `null` means the queue could not be read at all. Rounding the last two to `false` is what makes an agent wait for a distinct build that never arrives.
+
+Job names are spelled as Jenkins's own top-level job names and are URL-quoted whole, so a job inside a folder (`/job/team/job/build`) cannot be named here — that is true of the read allowlist too, and is a limitation of the whole family rather than of `ci.rerun`.
 | `ci.artifact` | `job`, `build` (optional, default last successful) | `{job,build,artifacts[] {fileName,relativePath,download}}` — metadata plus a per-file `download` URL, **never bytes** |
 
 `ci.builds` is a **last-N view**: a job that has been red for longer than
