@@ -28,6 +28,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from .memory_backend import ActorLabels, RequestContext, _display_actor
+from .review_backend import ReviewSpec, parse_review_spec
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 _PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")  # no leading dot: not ".", "..", ".git"
@@ -81,6 +82,11 @@ class _Doc:
     meta: dict[str, Any]
     created_by: str | None = None
     updated_by: str | None = None
+    # The git blob id. Measured identical to what GitHub's Contents API calls
+    # `sha`, which is what `docs.update` has to send back to get an
+    # optimistic-concurrency 409 instead of a silent overwrite -- so the read
+    # path already has it and nothing has to fetch it again.
+    blob: str = ""
     tokens: dict[str, int] = field(default_factory=dict)
     length: int = 0
 
@@ -268,6 +274,18 @@ class DocsCorpus:
                 lock = self._refresh_locks[project] = threading.Lock()
             return lock
 
+    def review_spec_for(self, project: str | None) -> "ReviewSpec | None":
+        """This project's review host, or None when its corpus is read-only.
+
+        Read-only is the default and the majority case: a `review` block is what
+        turns the write tools on for one project, and its absence is not an
+        error.
+        """
+        if not project:
+            return None
+        spec = self._current_registry().repos.get(project)
+        return spec.get("review") if isinstance(spec, dict) else None
+
     def has_project(self, project: str | None) -> bool:
         return bool(project) and project in self._current_registry().repos
 
@@ -328,6 +346,9 @@ class DocsCorpus:
             "frontmatter": doc.meta,
             "text": doc.text,
             "commit": snap.head,
+            # The handle docs.update needs. Named `sha` because that is what the
+            # review hosts call it; it is the blob id, not the commit.
+            "sha": doc.blob,
         }
         # Same display treatment as the memory listings: an opaque author key maps
         # through the token store and an email's domain is stripped, so docs and
@@ -451,6 +472,7 @@ class DocsCorpus:
         # the clone is ever opened by name.
         listing = self._git(dest, "ls-tree", "-r", "-l", "-z", "HEAD").split("\0")
         wanted: list[tuple[str, str, int]] = []
+        oids: dict[str, str] = {}
         total = 0
         for entry in listing:
             info, _, rel = entry.partition("\t")
@@ -470,6 +492,7 @@ class DocsCorpus:
                     f"docs corpus exceeds limits: {rel} is {nbytes} bytes", status=503)
             total += nbytes
             wanted.append((rel, oid, nbytes))
+            oids[rel] = oid
         if len(wanted) > self.MAX_DOCS:
             raise DocsBackendError(
                 f"docs corpus exceeds limits: {len(wanted)} documents", status=503)
@@ -493,7 +516,7 @@ class DocsCorpus:
             created_by, updated_by = authors.get(rel, (None, None))
             docs[rel] = _Doc(
                 path=rel, title=title, text=body.strip(), meta=meta,
-                created_by=created_by, updated_by=updated_by,
+                created_by=created_by, updated_by=updated_by, blob=oids.get(rel, ""),
             )
         return docs
 
@@ -572,7 +595,14 @@ def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
             raise ValueError(f"docs repo key {project!r} must be a plain name (letters, digits, . _ -; no leading dot)")
         if not isinstance(spec, dict) or not spec.get("url"):
             raise ValueError(f"docs repo entry for {project!r} needs a url")
-        repos[str(project)] = {"url": str(spec["url"]), "branch": str(spec.get("branch", "master"))}
+        entry = {"url": str(spec["url"]), "branch": str(spec.get("branch", "master"))}
+        # Validated at load time so a malformed `review` block is a boot error
+        # rather than a surprise at the first write: an operator who wrote one
+        # believes the write path is on.
+        review = parse_review_spec(str(project), spec, entry["branch"])
+        if review is not None:
+            entry["review"] = review
+        repos[str(project)] = entry
     return repos
 
 

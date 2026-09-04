@@ -33,9 +33,18 @@ _ISSUE_WRITE_TOOLS = frozenset({"issues.create", "issues.add_note", "issues.upda
 _ISSUE_TOOLS = _ISSUE_READ_TOOLS | _ISSUE_WRITE_TOOLS
 # Issue writes need an explicit role (default-deny); reads need only an issue_project.
 _ISSUE_WRITE_ROLE = "issue_writer"
-# Docs tools are read-only over the project's reviewed docs repo; tenancy is the
-# token's project claim (the corpus map is keyed by project — no new role needed).
-_DOCS_TOOLS = frozenset({"docs.search", "docs.get", "docs.list"})
+# Reads over the project's reviewed docs repo; tenancy is the token's project
+# claim (the corpus map is keyed by project — no new role needed).
+_DOCS_READ_TOOLS = frozenset({"docs.search", "docs.get", "docs.list", "docs.review_get"})
+# Writes PROPOSE: they open or revise a change on a review host under the
+# caller's own credential, and there is no tool that merges one. Two roles
+# because they are different acts -- writing a document and giving an opinion
+# on someone else's -- and a deployment may well grant only the second.
+_DOCS_WRITE_TOOLS = frozenset({"docs.create", "docs.update"})
+_DOCS_REVIEW_TOOLS = frozenset({"docs.review_comment"})
+_DOCS_WRITE_ROLE = "docs_writer"
+_DOCS_REVIEW_ROLE = "docs_reviewer"
+_DOCS_TOOLS = _DOCS_READ_TOOLS | _DOCS_WRITE_TOOLS | _DOCS_REVIEW_TOOLS
 # Tenancy for the CI family is the server-side project->jobs allowlist.
 _CI_READ_TOOLS = frozenset({"ci.status", "ci.log", "ci.builds", "ci.artifact"})
 # ci.rerun spends build capacity, so it takes a SECOND allowlist (the jobs a
@@ -75,8 +84,16 @@ class Policy:
             return PolicyDecision("deny", "destructive operations are denied")
         if tool_name in self._ALLOWED_MEMORY_TOOLS:
             return PolicyDecision("allow", "phase1 memory tool")
-        if tool_name in _DOCS_TOOLS:
+        if tool_name in _DOCS_READ_TOOLS:
             return PolicyDecision("allow", "docs read")
+        if tool_name in _DOCS_WRITE_TOOLS:
+            if _DOCS_WRITE_ROLE not in principal.roles:
+                return PolicyDecision("deny", "token lacks docs write role")
+            return PolicyDecision("allow", "docs propose")
+        if tool_name in _DOCS_REVIEW_TOOLS:
+            if _DOCS_REVIEW_ROLE not in principal.roles:
+                return PolicyDecision("deny", "token lacks docs review role")
+            return PolicyDecision("allow", "docs review comment")
         if tool_name in _CI_READ_TOOLS:
             return PolicyDecision("allow", "ci read")
         if tool_name in _CI_WRITE_TOOLS:
@@ -105,6 +122,7 @@ class GatewayApp:
         confirmation: ConfirmationStore | None = None,
         docs_corpus: DocsCorpus | None = None,
         ci_backend: JenkinsHttpBackend | None = None,
+        docs_review: Any = None,
     ) -> None:
         self._memory_backend = memory_backend
         self._audit_sink = audit_sink
@@ -114,6 +132,10 @@ class GatewayApp:
         self._confirm = confirmation or ConfirmationStore()
         self._docs_corpus = docs_corpus
         self._ci_backend = ci_backend
+        # None unless a review host is configured for at least one project. The
+        # docs read tools do not need it, which is why the corpus and the write
+        # path are two objects rather than one.
+        self._docs_review = docs_review
 
     def handle_rpc(self, message: dict[str, Any], principal: Principal) -> dict[str, Any] | None:
         if message.get("jsonrpc") != "2.0":
@@ -141,8 +163,11 @@ class GatewayApp:
             ci_enabled = self._ci_backend is not None and self._ci_backend.has_project(principal.project)
             ci_write_enabled = self._ci_backend is not None and \
                 self._ci_backend.has_trigger_project(principal.project)
+            docs_review_enabled = self._docs_review is not None and \
+                self._docs_review.has_project(principal.project)
             tools = visible_tool_definitions(principal, self._issue_backend is not None, docs_enabled,
-                                             ci_enabled, ci_write_enabled=ci_write_enabled)
+                                             ci_enabled, ci_write_enabled=ci_write_enabled,
+                                             docs_review_enabled=docs_review_enabled)
             return _result(request_id, {"tools": tools})
         if method == "tools/call":
             return self._handle_tool_call(request_id, params, principal)
@@ -395,6 +420,49 @@ class GatewayApp:
             return self._docs_corpus.get(path, context)
         if name == "docs.list":
             return self._docs_corpus.list(context)
+        if self._docs_review is None:
+            raise DocsBackendError(
+                "this project's docs corpus is read-only: no review host is configured for it",
+                status=404,
+            )
+        if name == "docs.review_get":
+            return self._docs_review.get(_required_change_ref(arguments), context)
+        if name == "docs.create":
+            path = _required_text(arguments, "path", max_len=500)
+            content = _required_text(arguments, "content", max_len=200_000)
+            message = _required_text(arguments, "message", max_len=255)
+            # Everything that gets committed, not just the prose: a document body
+            # is the most likely place in this whole gateway for a pasted
+            # credential to end up, and a corpus is team-visible.
+            _reject_secret(find_secret(path, content, message))
+            pending = self._confirmation_gate(
+                name, {"path": path, "message": message}, arguments, principal,
+                f"Propose a NEW document {path!r}")
+            if pending is not None:
+                return pending
+            return self._docs_review.create(path, content, message, context)
+        if name == "docs.update":
+            path = _required_text(arguments, "path", max_len=500)
+            content = _required_text(arguments, "content", max_len=200_000)
+            message = _required_text(arguments, "message", max_len=255)
+            base_sha = _required_text(arguments, "sha", max_len=64)
+            _reject_secret(find_secret(path, content, message))
+            pending = self._confirmation_gate(
+                name, {"path": path, "message": message, "sha": base_sha}, arguments, principal,
+                f"Propose a change to {path!r}")
+            if pending is not None:
+                return pending
+            return self._docs_review.update(path, content, message, base_sha, context)
+        if name == "docs.review_comment":
+            change_ref = _required_change_ref(arguments)
+            body = _required_text(arguments, "body", max_len=20_000)
+            _reject_secret(find_secret(body))
+            pending = self._confirmation_gate(
+                name, {"change": change_ref, "body": body}, arguments, principal,
+                f"Comment on proposal #{change_ref}")
+            if pending is not None:
+                return pending
+            return self._docs_review.comment(change_ref, body, context)
         raise ValueError(f"Unknown docs tool: {name}")
 
     def _call_ci_tool(
@@ -858,6 +926,76 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "docs.create",
+            "description": (
+                "Propose a NEW document as a change on this project's review host (two-step: call "
+                "once for a confirmationId, then again with `confirm`). It does NOT publish — it "
+                "opens a proposal under YOUR OWN identity for a person to merge or reject. Refused "
+                "if the path already exists; use docs.update for that."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path within the corpus, e.g. wiki/onboarding.md"},
+                    "content": {"type": "string", "description": "The whole document, including frontmatter."},
+                    "message": {"type": "string", "description": "Why, in one line. Becomes the proposal title."},
+                    "confirm": {"type": "string"},
+                },
+                "required": ["path", "content", "message"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "docs.update",
+            "description": (
+                "Propose a change to an EXISTING document (two-step, like docs.create). Send the "
+                "`sha` that docs.get returned for it: if the document moved since you read it the "
+                "proposal is refused rather than overwriting someone's edit. Opens a proposal under "
+                "your own identity; publishing stays a human action."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string", "description": "The whole document after your change."},
+                    "message": {"type": "string"},
+                    "sha": {"type": "string", "description": "The `sha` docs.get returned for this path."},
+                    "confirm": {"type": "string"},
+                },
+                "required": ["path", "content", "message", "sha"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "docs.review_comment",
+            "description": (
+                "Add an advisory comment to a proposal (two-step, like the others). It is a comment "
+                "and nothing else: it cannot approve, cannot request changes, and cannot satisfy a "
+                "required-approvals rule. It is posted under your own identity and carries a footer "
+                "saying it came through this gateway."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "change": {"type": "integer", "minimum": 1, "description": "The proposal number."},
+                    "body": {"type": "string"},
+                    "confirm": {"type": "string"},
+                },
+                "required": ["change", "body"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "docs.review_get",
+            "description": "One proposal's state, title and url (read-only).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"change": {"type": "integer", "minimum": 1}},
+                "required": ["change"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "ci.status",
             "description": "Last-build status of this project's CI jobs (read-only).",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -942,7 +1080,7 @@ def tool_definitions() -> list[dict[str, Any]]:
 
 def visible_tool_definitions(
     principal: Principal, issue_enabled: bool, docs_enabled: bool = False, ci_enabled: bool = False,
-    ci_write_enabled: bool = False,
+    ci_write_enabled: bool = False, docs_review_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     # Advertise only the tools this principal could actually call: issue tools need
     # the backend configured and an issue_project, and issue writes need the write
@@ -958,6 +1096,13 @@ def visible_tool_definitions(
             if name in _ISSUE_WRITE_TOOLS and _ISSUE_WRITE_ROLE not in principal.roles:
                 continue
         if name in _DOCS_TOOLS and not docs_enabled:
+            continue
+        if name in (_DOCS_WRITE_TOOLS | _DOCS_REVIEW_TOOLS | {"docs.review_get"}) \
+                and not docs_review_enabled:
+            continue
+        if name in _DOCS_WRITE_TOOLS and _DOCS_WRITE_ROLE not in principal.roles:
+            continue
+        if name in _DOCS_REVIEW_TOOLS and _DOCS_REVIEW_ROLE not in principal.roles:
             continue
         if name in _CI_TOOLS and not ci_enabled:
             continue
@@ -1033,6 +1178,15 @@ def _optional_text(arguments: dict[str, Any], key: str, max_len: int) -> str | N
         raise ValueError(f"'{key}' is too long")
     stripped = value.strip()
     return stripped or None
+
+
+def _required_change_ref(arguments: dict[str, Any]) -> int:
+    """A proposal number: a positive int, validated here because it is spliced
+    into a URL path segment on the review host."""
+    value = arguments.get("change")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("'change' must be a positive integer (the proposal number)")
+    return value
 
 
 def _optional_int(arguments: dict[str, Any], key: str, *, minimum: int, maximum: int) -> int | None:
