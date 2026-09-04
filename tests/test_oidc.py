@@ -308,15 +308,36 @@ class GrantTests(_OidcTestCase):
 
     def test_a_repaired_grants_file_is_picked_up_without_waiting_for_another_edit(self):
         # A failed parse must NOT be recorded as the version seen, or a botched
-        # offboarding edit stays fail-open until someone touches the file again.
+        # offboarding edit stays fail-open until someone touches the file AGAIN.
+        #
+        # The repair below is written with the SAME byte length and then stamped
+        # with the SAME mtime as the corrupt version, and `write_text` truncates
+        # in place so the inode is unchanged too -- so (mtime, size, inode) is
+        # identical and the ONLY thing that can pick the repair up is the retry.
+        # A repair with a different signature would pass whether or not the
+        # failed parse was recorded, which is what an earlier version of this
+        # test did and why it could not fail.
+        good = json.dumps({"subjects": {"user-1": {"project": "repaired"}}})
+        corrupt = "{" * len(good)
+        self.assertEqual(len(corrupt), len(good))
+
+        path = Path(self.grants_path)
         grants = GrantsFile(self.grants_path)
         auth = OidcAuthenticator(ISSUER, AUDIENCE, self.cache, grants)
         time.sleep(0.01)
-        Path(self.grants_path).write_text("{ not json", encoding="utf-8")
+        path.write_text(corrupt, encoding="utf-8")
+        stamp = path.stat()
         self.assertEqual(auth.authenticate(self.idp.token()).project, "team-a")
         self.assertTrue(grants.stale)
-        Path(self.grants_path).write_text(json.dumps(
-            {"subjects": {"user-1": {"project": "repaired"}}}), encoding="utf-8")
+
+        inode_before = stamp.st_ino
+        path.write_text(good, encoding="utf-8")
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        after = path.stat()
+        self.assertEqual((after.st_mtime_ns, after.st_size, after.st_ino),
+                         (stamp.st_mtime_ns, stamp.st_size, inode_before),
+                         "the fixture failed to reproduce an identical signature")
+
         self.assertEqual(auth.authenticate(self.idp.token()).project, "repaired")
         self.assertFalse(grants.stale)
 
@@ -364,6 +385,31 @@ class JwksTests(_OidcTestCase):
         jwks["keys"][0]["use"] = "enc"
         cache = JwksCache(f"{ISSUER}/jwks", opener=lambda _u: json.dumps(jwks).encode())
         self.assertIsNone(cache.get("r1"))
+
+    def test_a_slow_idp_does_not_block_every_other_authentication(self):
+        # The refresh must not hold the lock across the network call: one slow IdP
+        # would otherwise serialize every OIDC authentication in the process, which
+        # an attacker can trigger on demand with a rotating unknown kid.
+        import threading as _t
+        released = _t.Event()
+        payload = json.dumps(self.idp.jwks).encode()
+
+        def slow(_url):
+            released.wait(2.0)
+            return payload
+
+        cache = JwksCache(f"{ISSUER}/jwks", opener=slow)
+        cache._keys = {"r1": "placeholder"}          # a last-good set to serve meanwhile
+        cache._fetched_at = 0.0                      # ... which is stale, so a fetch starts
+        fetcher = _t.Thread(target=cache.get, args=("r1",), daemon=True)
+        fetcher.start()
+        time.sleep(0.05)                             # let it get into the fetch
+
+        answered = _t.Event()
+        _t.Thread(target=lambda: (cache.get("r1"), answered.set()), daemon=True).start()
+        self.assertTrue(answered.wait(1.0), "a second caller blocked on the in-flight fetch")
+        released.set()
+        fetcher.join(timeout=3)
 
     def test_a_missing_kid_resolves_only_when_the_issuer_publishes_one_key(self):
         many = JwksCache(f"{ISSUER}/jwks", opener=self.idp.opener)
