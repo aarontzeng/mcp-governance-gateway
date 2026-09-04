@@ -40,7 +40,14 @@ All notable changes to this project are recorded here. The format follows
   passed through, and a last-build reply with no usable build number now returns
   the never-built row (all fields null) instead of a partial one. The never-built
   row also carries the same keys as a real one, so a caller no longer has to
-  branch on which fields are present.
+  branch on which fields are present. `timestamp` and `durationMs` are no longer
+  passed through untouched either: a non-numeric value from Jenkins becomes
+  `null` and a fractional millisecond is truncated to an integer.
+- `ci.log` returns its `build` and `result` from the same last-build row as
+  `ci.status`, so the three changes above reach it as well: a non-string
+  `result` reads as `UNKNOWN`, and a last build with no usable build number
+  reads as `build: null, result: "UNKNOWN"` rather than echoing whatever
+  Jenkins sent. The console tail itself is unchanged.
 
 ## [0.1.0] — 2026-09-02
 

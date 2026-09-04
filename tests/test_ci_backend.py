@@ -542,6 +542,34 @@ class ProjectWideHistoryTests(unittest.TestCase):
             fake.builds(None, _ctx())
 
 
+class LogMetadataTests(unittest.TestCase):
+    """`ci.log` takes its build/result from the same row as `ci.status`.
+
+    That is not obvious from `log()` -- it calls `_job_status` for metadata -- so
+    the shared normalizer reaches a third tool. Pinned here because a review
+    found it unlisted and untested rather than because it is new behaviour.
+    """
+
+    def _log(self, last_build):
+        import json as _json
+        fake = FakeJenkins(replies={"/api/json": _json.dumps(last_build).encode()})
+        return fake.log("swarm-build", _ctx(), lines=1)
+
+    def test_a_non_string_result_reads_as_unknown_in_the_log_metadata_too(self):
+        self.assertEqual(self._log({"number": 128, "result": 42, "building": False})["result"], "UNKNOWN")
+
+    def test_a_last_build_with_no_usable_number_reads_as_never_built(self):
+        for body in ({"building": True}, {"number": 0, "result": "FAILURE"}, {"number": True}):
+            out = self._log(body)
+            self.assertIsNone(out["build"], body)
+            self.assertEqual(out["result"], "UNKNOWN", body)
+
+    def test_an_ordinary_last_build_is_unchanged(self):
+        out = self._log(dict(LAST_BUILD))
+        self.assertEqual((out["build"], out["result"]), (128, "FAILURE"))
+        self.assertEqual(out["lines"], ["line 500"])   # the console tail is untouched
+
+
 class GatewayCiTests(unittest.TestCase):
     def setUp(self):
         self.audit = _ListAudit()
