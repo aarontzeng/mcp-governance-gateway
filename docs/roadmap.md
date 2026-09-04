@@ -63,9 +63,13 @@ impossible one. Reporting that upstream is the next step, not building a
 client-side workaround around a replay endpoint.
 
 Note the related finding now recorded in [SECURITY.md](../SECURITY.md#known-limitations):
-the filter `mem::search` does apply has a documented fail-open branch for
-evicted sessions, so today's keyword path is not the clean baseline the
-smart-search comparison assumed either.
+the filter `mem::search` does apply fails open for sessions evicted since
+indexing, by construction rather than by chance, so today's keyword path is not
+the clean baseline the smart-search comparison assumed either. Whatever is done
+about semantic retrieval, the tenancy question has to be answered for the
+keyword path too — and the first thing to establish is the backend's session
+retention policy, since the exposure grows with the fraction of a corpus that
+has outlived it.
 
 ## CI: parameterised triggers
 

@@ -65,16 +65,28 @@ token's project to agentmemory and returns what comes back; the hits carry no
 project field, so the gateway cannot re-filter them the way it re-filters issue
 and docs results. A backend that ignores its own filter would leak across tenants
 through this one tool — and this is sharper than a hypothetical. Read at
-agentmemory v0.9.29 (`e04ba88`): `mem::search` does filter per row, by loading
-each hit's session and comparing `session.project`, but it has a **deliberate
-fail-open branch**. When the session has been evicted it falls back to the
-observation's own recorded project, and a `null` there is documented in that
-code as "project unknown — treat as unscoped and let it through", for backward
-compatibility. So a hit whose session is gone and whose observation carries no
-project reaches the caller regardless of the project asked for. The gateway
-cannot detect this: the hits carry no project field for it to re-check. Treat
-`memory.search` results as scoped by a filter that is best-effort at the
-backend, not as a tenant boundary the gateway enforces. `memory.action_update_status` checks the target's project
+agentmemory v0.9.29 (`e04ba88`), `src/functions/search.ts:541-566`:
+`mem::search` does filter per row, by loading each hit's session and comparing
+`session.project`. When the session is *not* found it takes a **deliberate
+fail-open branch**, and its own comment enumerates two cases:
+
+- a memory indexed with a synthetic sessionId is still filtered, because a
+  probe into the memories store returns that memory's own project;
+- **an evicted session is not.** The comment says the probe "returns null for
+  these (they are observations, not memories)", so for this case the fallback
+  yields null *by construction* rather than by chance, and the row passes
+  through unscoped. The code calls that "the safe fallback" — safe for
+  availability, fail-open for tenancy.
+
+So a hit whose session has been evicted since indexing reaches the caller
+whatever project was asked for, and the gateway cannot detect it because the
+hits carry no project field for it to re-check.
+
+The operational consequence is the part to plan around: the exposure is
+proportional to how much of the corpus has outlived the backend's session
+retention, so it grows over time in a long-lived deployment rather than being
+a fixed risk. Treat `memory.search` results as scoped by a filter that is
+best-effort at the backend, not as a tenant boundary this gateway enforces. `memory.action_update_status` checks the target's project
 by listing first and then updates by id, so a record re-homed between the two
 calls is updated on its new project.
 
