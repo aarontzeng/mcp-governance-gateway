@@ -148,12 +148,24 @@ escalation; what it means is that a leaked `confirmationId` is a *user*-level
 capability for its 300-second life rather than a credential-level one. Treat a
 confirmation id as you would the write it authorizes.
 
-**One active instance.** Confirmation state, quotas, docs snapshots and the audit
-stream are process-local, and the credential store is guarded by an in-process
-lock only. Two instances behind a load balancer are two enforcement points, not
-one: a prepare on A cannot commit on B, quotas multiply by the instance count,
-and concurrent credential enrollment can lose a record. Run one active instance
-until that state moves to shared storage.
+**One active instance.** Everything the gateway remembers between calls lives in
+the process. The full list, because "quotas" was doing too much work in an
+earlier version of this sentence:
+
+- confirmation nonces (`confirm.py`);
+- the memory read and write quotas (`limits.py`);
+- **the credential-enrollment API's own two rate limiters** — writes and reads
+  are separate counters (`internal_api.py`), and they are not the memory quotas;
+- docs corpus snapshots and their registry generation (`docs_backend.py`);
+- the OIDC key cache and grants mapping (`oidc.py`);
+- the audit stream (`audit.py`), and the credential store, which is guarded by
+  a lock on the instance rather than on the file.
+
+Two instances behind a load balancer are two enforcement points, not one: a
+prepare on A cannot commit on B, every one of those counters multiplies by the
+instance count, and concurrent credential enrollment can lose a record — or,
+worse, undo a revocation, which the paragraph below describes. Run one active
+instance until that state moves to shared storage.
 
 Worth stating more sharply than "can lose a record", because one case is
 fail-OPEN rather than fail-safe: the credential store's read-modify-write is
