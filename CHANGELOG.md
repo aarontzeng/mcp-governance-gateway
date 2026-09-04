@@ -20,6 +20,14 @@ All notable changes to this project are recorded here. The format follows
   and `OIDC_AUDIENCE` is required with no default. The key set is cached, with
   last-good kept across an IdP outage. No new dependency: `cryptography` was
   already required.
+- **`mcpgw-admin`** — a reference minter for deployments without an identity
+  provider, satisfying what ADR-0007 asks of one: tokens from `secrets`, and an
+  atomic `mkstemp` + `fchmod 0600` + `fsync` + `os.replace` write. Subcommands
+  `mint`, `rotate`, `revoke`, `list`, `grant`, `revoke-role`. It writes only
+  `GATEWAY_USER_TOKEN_FILE` and refuses to rewrite the operator-managed
+  `GATEWAY_TOKEN_FILE`; `--actor` is never defaulted; the token is printed once
+  and `list` shows `token_id` instead. It is not a portal — what a self-service
+  credential page looks like remains a deployment's own question.
 
 - `ci.builds` — recent build history, newest first (1–50 rows per job, default
   10). `ci.status` reports the last build only, which cannot distinguish a job

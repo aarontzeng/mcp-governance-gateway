@@ -100,10 +100,14 @@ process-local quota still multiplies quotas across replicas.
 
 ## Not planned
 
+- **A credential-provisioning portal.** Minting tokens, enrolling credentials
+  and onboarding projects are deployment concerns with deployment-shaped
+  answers (ADR-0007). What this project owes is the *primitive*, and it now
+  ships two: OIDC verification (ADR-0016), so a deployment with an IdP mints
+  nothing at all, and `mcpgw-admin` for one without. What a self-service page
+  looks like — who may open it, how it authenticates, what it shows — is still
+  a question with a different answer in every organization, and a UI here would
+  be one organization's answer wearing a project's name.
 - **`git push` as a tool.** Review comments are not ref updates and may be in
   scope; pushing code is not, until policy and audit controls are proven well
   past their current state.
-- **A credential-provisioning portal.** Minting tokens, enrolling credentials and
-  onboarding projects are deployment concerns with deployment-shaped answers
-  (see ADR-0007). This project defines what a minter must guarantee, not how it
-  looks.

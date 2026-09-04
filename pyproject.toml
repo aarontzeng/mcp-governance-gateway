@@ -33,6 +33,7 @@ dev = ["pytest>=8", "build", "twine"]
 
 [project.scripts]
 mcp-governance-gateway = "mcp_governance_gateway.server:main"
+mcpgw-admin = "mcp_governance_gateway.admin_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

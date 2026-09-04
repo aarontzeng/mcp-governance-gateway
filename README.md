@@ -84,6 +84,18 @@ export OIDC_AUDIENCE=mcp-governance-gateway
 export OIDC_GRANTS_FILE=/etc/mcp-governance-gateway/oidc-grants.json
 ```
 
+No identity provider? `mcpgw-admin` is the reference minter — it writes the
+same token store, atomically, with tokens from `secrets` rather than from
+whatever you would have typed:
+
+```bash
+mcpgw-admin --store /var/lib/mcp-governance-gateway/user-tokens.json \
+  mint --actor 10000001 --project demo-project --role issue_writer
+```
+
+`--actor` has no default on purpose: ADR-0007 wants a verified immutable id,
+and one this tool guessed from `$USER` would be neither.
+
 Enable more backends by setting their environment variables (see
 [`.env.example`](.env.example)):
 
