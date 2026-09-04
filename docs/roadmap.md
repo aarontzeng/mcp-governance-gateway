@@ -11,7 +11,15 @@ requests opened under the caller's own credential, and nothing here can merge
 one. Three pieces of the original design are still out:
 
 - **GitLab**, and after that anything else. The interface is host-neutral; only
-  the GitHub implementation exists.
+  the GitHub implementation exists. Narrower than it looks: `gitlab_backend.py`
+  is already a working GitLab client with per-user PAT resolution through the
+  credential store, so the open question is whether the review surface (open an
+  MR, add a note, detect a stale write) can reuse its `_request` and its
+  credential path rather than what GitLab's API offers. One genuinely external
+  unknown remains, and it is empirical rather than documentary: whether a stale
+  `last_commit_id` answers 400 or 409. Measure it against a throwaway project
+  the way the GitHub statuses were measured; do not take it from documentation
+  nobody fetched.
 - **Images.** Upstream stages them through a presigned single-use upload so the
   bytes never pass through the agent's context. Inlining base64 in a tool
   argument would undo exactly that, so it waits for the endpoint rather than

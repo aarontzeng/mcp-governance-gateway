@@ -157,7 +157,13 @@ earlier version of this sentence:
 - **the credential-enrollment API's own two rate limiters** — writes and reads
   are separate counters (`internal_api.py`), and they are not the memory quotas;
 - docs corpus snapshots and their registry generation (`docs_backend.py`);
-- the OIDC key cache and grants mapping (`oidc.py`);
+- the OIDC key cache (`oidc.py`) — a stale one costs availability;
+- **the OIDC grants mapping, and its own staleness flag** (`oidc.py`) — which is
+  not a cache convenience. Grants supply TENANCY under ADR-0016, and the flag
+  that says "the last parse failed, this map may be out of date" is per
+  instance. Two instances can therefore serve two different tenancy mappings at
+  the same moment, and `/healthz` reports the staleness of whichever one
+  answered;
 - the audit stream (`audit.py`), and the credential store, which is guarded by
   a lock on the instance rather than on the file.
 
