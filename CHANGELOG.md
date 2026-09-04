@@ -55,6 +55,27 @@ All notable changes to this project are recorded here. The format follows
   CSRF and refuses a password POST without a session-bound crumb, and a 403 now
   says so instead of reading as a permissions problem.
 
+- **The docs corpus write path (ADR-0017)** — `docs.create`, `docs.update`,
+  `docs.review_comment` and `docs.review_get`. A write does not publish: it
+  opens or revises a **pull request** on the project's review host, under the
+  **caller's own credential**, and there is no tool that merges one. That is
+  enforced by the review-backend interface having no merge, approve or push
+  method rather than by a policy check. A comment is a plain comment: verified
+  against GitHub that it creates no review and cannot satisfy a
+  required-approvals rule.
+
+  Per project, and off by default: a corpus stays read-only unless its entry in
+  `DOCS_REPOS_FILE` carries a `review` block. Two roles, because proposing a
+  document and giving an opinion on someone else's are different acts:
+  `docs_writer` and `docs_reviewer`. All three writes are confirmation-gated and
+  secret-scanned. `docs.create` refuses a path that exists; `docs.update` carries
+  the `sha` that `docs.get` now returns, so a document that moved under the agent
+  is a 409 rather than a silent overwrite. A proposal may only name a document
+  the read path would serve — under a served directory, ending in `.md` — so the
+  tools cannot propose a workflow file or a source file.
+
+  GitHub only in this release. The interface is host-neutral and GitLab is next.
+
 ### Changed
 
 - `ci.status` rows now carry `startedAt` (ISO-8601) beside the existing

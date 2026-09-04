@@ -293,3 +293,38 @@ class GatewayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShippedExampleTests(unittest.TestCase):
+    """The examples an adopter copies must load verbatim, `_comment` and all."""
+
+    def _examples(self):
+        from pathlib import Path
+        return Path(__file__).resolve().parent.parent / "config" / "examples"
+
+    def test_the_docs_repos_example_loads_with_its_prose_intact(self):
+        # JSON has no comments, so these files carry a `_comment` key. A loader
+        # that treated it as a project made the shipped example a boot error.
+        from mcp_governance_gateway.docs_backend import load_docs_repos
+        repos = load_docs_repos(str(self._examples() / "docs-repos.example.json"))
+        self.assertNotIn("_comment", repos)
+        self.assertEqual(repos["team-a"]["review"].repo, "org/handbook")
+        self.assertIsNone(repos["team-b"].get("review"))
+
+    def test_only_the_comment_key_is_prose_a_leading_underscore_is_a_project(self):
+        # `_scratch` is a legal project name and an existing test says so, so the
+        # skip is exactly one key rather than a prefix rule.
+        import json as _json, tempfile, os
+        from mcp_governance_gateway.docs_backend import load_docs_repos
+        path = os.path.join(tempfile.mkdtemp(), "r.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            _json.dump({"_comment": ["prose"], "_scratch": {"url": "u", "branch": "main"}}, handle)
+        repos = load_docs_repos(path)
+        self.assertEqual(list(repos), ["_scratch"])
+
+    def test_the_ci_examples_load_with_their_prose_intact(self):
+        from mcp_governance_gateway.ci_backend import load_ci_jobs, load_ci_trigger_jobs
+        jobs = load_ci_trigger_jobs(str(self._examples() / "ci-trigger-jobs.example.json"))
+        self.assertNotIn("_comment", jobs)
+        self.assertEqual(jobs["demo-project"], ["demo-tests"])
+        self.assertNotIn("_comment", load_ci_jobs(str(self._examples() / "ci-trigger-jobs.example.json")))

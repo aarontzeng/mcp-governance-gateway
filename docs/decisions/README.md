@@ -18,6 +18,7 @@ Read them in order for the reasoning behind the gateway's boundaries.
 | [0013](ADR-0013-issue-backend-per-deployment.md) | Issue Backend Selected per Deployment | Accepted |
 | [0015](ADR-0015-document-author-provenance.md) | Full Git History for Document Author Provenance | Accepted, amends 0011 |
 | [0016](ADR-0016-oidc-as-a-second-authenticator.md) | OIDC as a Second Authenticator, Tenancy Kept Out of the Token | Accepted, extends 0007 |
+| [0017](ADR-0017-propose-not-publish.md) | An Agent May Propose a Document, Only a Person May Publish It | Accepted, extends 0011 |
 
 Numbering is historical and non-contiguous. ADR numbers are stable identifiers,
 so a decision specific to one organization's internal deployment — a particular

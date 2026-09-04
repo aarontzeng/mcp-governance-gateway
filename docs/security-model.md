@@ -18,16 +18,20 @@
 
 ## Authorization as implemented
 
-The token's `roles` gate two things: issue **writes** require `issue_writer`,
-and starting a CI build requires `ci_runner`. Everything else is tenancy, not
-role:
+The token's `roles` gate four things: issue **writes** require `issue_writer`,
+starting a CI build requires `ci_runner`, proposing a document requires
+`docs_writer`, and commenting on a proposal requires `docs_reviewer`.
+Everything else is tenancy, not role:
 
 | Tools | Requires | Confirmation |
 |---|---|---|
 | `memory.*` (including every write) | a `project` claim | **No** |
 | `issues.get` / `search` / `mine` / `categories` | an `issue_project` claim | No |
 | `issues.create` / `add_note` / `update_status` | `issue_project` + `issue_writer` role | Yes |
-| `docs.*` (read-only) | a docs corpus configured for the project | No |
+| `docs.search` / `get` / `list` | a docs corpus configured for the project | No |
+| `docs.review_get` | a `review` host configured for that corpus | No |
+| `docs.create` / `docs.update` | a review host, the `docs_writer` role, **and the caller's own credential for that host** | Yes |
+| `docs.review_comment` | a review host, the `docs_reviewer` role, and the caller's own credential | Yes |
 | `ci.status` / `ci.builds` / `ci.log` / `ci.artifact` | the project present in `CI_JOBS_FILE` | No |
 | `ci.rerun` | the job present in `CI_TRIGGER_JOBS_FILE` **and** the `ci_runner` role | Yes |
 | any tool whose name ends in delete/destroy/purge/remove | — | Denied outright |

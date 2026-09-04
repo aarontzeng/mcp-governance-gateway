@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "project -> the git repo its docs corpus is read from.",
+    "A `review` block turns the WRITE path on for that project. Without one the",
+    "corpus is read-only, which is the default. `type` is github today; `api`",
+    "defaults to https://api.github.com (set it for GitHub Enterprise);",
+    "`baseBranch` defaults to `branch`, so proposals cannot target something",
+    "nobody reads.",
+    "Writes go out under the CALLER's own credential for that host, enrolled in",
+    "the credential store as backend `docs-github`, and need the `docs_writer`",
+    "or `docs_reviewer` role. Nothing here can merge a proposal -- see ADR-0017",
+    "for what your repository's own settings still have to carry."
+  ],
+  "team-a": {
+    "url": "https://github.com/org/handbook.git",
+    "branch": "main",
+    "review": {
+      "type": "github",
+      "repo": "org/handbook"
+    }
+  },
+  "team-b": {
+    "url": "https://git.example.internal/team-b/docs.git",
+    "branch": "master"
+  }
+}

@@ -587,6 +587,11 @@ def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
         raise ValueError("docs repos file must be a JSON object of project -> {url, branch}")
     repos: dict[str, dict[str, str]] = {}
     for project, spec in data.items():
+        # JSON has no comments, and a config file an operator reads deserves
+        # prose in it. Exactly this one key, not every `_`-prefixed one: a
+        # leading underscore is a legal project name and a test says so.
+        if project == "_comment":
+            continue
         # The key names the clone directory under the cache root, so it must be a
         # single path component: a key like "../other" would make the gateway fetch
         # into -- and hard-reset -- a checkout outside the cache, and ".git" is the

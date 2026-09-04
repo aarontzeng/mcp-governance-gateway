@@ -4,27 +4,24 @@ What this release deliberately does not include, and what would have to be true
 for it to. Items are not dated: this is a reference implementation, and the order
 reflects dependency rather than a schedule.
 
-## Docs corpus: write path and review workflow
+## Docs corpus: images, templates, and other hosts
 
-Today the docs corpus is **read-only** (`docs.search` / `get` / `list`). The
-write half was implemented upstream of this release and has not been ported here yet: `docs.create` /
-`docs.update` push real review changes under the caller's own SSH key, agents
-pre-review with a vote clamped to ±1 server-side, and publishing is human-only.
+The write path landed in 0.2.0 for GitHub (ADR-0017): proposals are pull
+requests opened under the caller's own credential, and nothing here can merge
+one. Three pieces of the original design are still out:
 
-That design is the most interesting governance property in the whole system — an
-agent can propose and advise, but only a person can publish. It is not here yet
-because it lands as a coherent block rather than a trickle:
+- **GitLab**, and after that anything else. The interface is host-neutral; only
+  the GitHub implementation exists.
+- **Images.** Upstream stages them through a presigned single-use upload so the
+  bytes never pass through the agent's context. Inlining base64 in a tool
+  argument would undo exactly that, so it waits for the endpoint rather than
+  arriving in a worse shape.
+- **`docs.review_list`.** The interface has no list operation yet; `review_get`
+  answers about a proposal you already know the number of.
 
-- a per-user SSH credential store, generated server-side, with the private half
-  never leaving the process
-- a code-review server to push to (the implementation is Gerrit-specific; the
-  boundary is not, but nothing else is wired)
-- an image-asset staging path with its own presigned single-use upload
-- template seeding, which needs an opinion about document structure that belongs
-  to a deployment rather than to this project
-
-The read path's author provenance already landed (ADR-0015), since it needs only
-the git log.
+Template seeding is not on this list any more: templates are read from
+`.mcpgw/templates/` in the corpus itself, which makes the opinion about document
+structure the deployment's rather than this project's.
 
 ## Corpus linting
 

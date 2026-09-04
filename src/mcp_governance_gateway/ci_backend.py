@@ -205,6 +205,9 @@ def load_ci_jobs(path: str) -> dict[str, list[str]]:
         raise ValueError("ci jobs file must be a JSON object of project -> [job, ...]")
     jobs: dict[str, list[str]] = {}
     for project, names in data.items():
+        # Same one-key convention as the docs repo map: prose, not a project.
+        if project == "_comment":
+            continue
         if not isinstance(names, list) or not all(isinstance(n, str) and n.strip() for n in names):
             raise ValueError(f"ci jobs for {project!r} must be a list of job names")
         jobs[str(project)] = [n.strip() for n in names]
