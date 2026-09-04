@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -335,10 +336,10 @@ class SpecKeyedSnapshotTests(unittest.TestCase):
         # drops the project cannot make it index a mutable map that no longer has it.
         original = self.corpus._load_docs
 
-        def drop_then_load(dest):
+        def drop_then_load(dest, commit):
             self._write({"q": {"url": self.other, "branch": "master"}})  # p disappears
             self.corpus._current_registry()
-            return original(dest)
+            return original(dest, commit)
 
         self.corpus._load_docs = drop_then_load
         out = self.corpus.get("wiki/x.md", _ctx("p"))   # must not raise KeyError
@@ -356,10 +357,12 @@ class SpecKeyedSnapshotTests(unittest.TestCase):
         gate = threading.Event()
         original = self.corpus._load_docs
 
-        def slow_for_p(dest):
-            if dest.endswith("/p"):
+        def slow_for_p(dest, commit):
+            # The clone directory is `<project>-<url digest>` now, so match the
+            # prefix rather than the whole basename.
+            if os.path.basename(dest).startswith("p-"):
                 gate.wait(timeout=5)
-            return original(dest)
+            return original(dest, commit)
 
         self.corpus._load_docs = slow_for_p
         done = []
@@ -417,7 +420,11 @@ class CloneHistoryTests(unittest.TestCase):
                               capture_output=True, text=True).stdout.strip()
 
     def test_an_existing_shallow_clone_is_upgraded_in_place(self):
-        dest = str(Path(self.clones) / "p")
+        # The clone directory is keyed by project AND url (so two repos sharing a
+        # project name cannot share a directory), so the fixture has to build its
+        # legacy shallow clone where the corpus will actually look for it.
+        from mcp_governance_gateway.docs_backend import _url_key
+        dest = str(Path(self.clones) / f"p-{_url_key(self.remote)}")
         Path(self.clones).mkdir(parents=True, exist_ok=True)
         # file:// on purpose: git ignores --depth for a plain local path (it hardlinks
         # objects instead), so this is the only way to reproduce the state an earlier
@@ -778,6 +785,76 @@ class TreeReadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedCloneDirTests(unittest.TestCase):
+    """Two gateways pointed at one DOCS_CLONE_DIR must not serve each other's docs.
+
+    Found by an adversarial reproduction, not by a review read. Two instances
+    whose repos files map the same PROJECT NAME to different repositories used
+    to share one clone directory keyed by project alone, and each then served
+    the other's documents under its own configured corpus -- content across a
+    tenant boundary, not a degraded guarantee, and undetectable downstream
+    because the snapshot's own head and documents came from different commits.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = self._tmp.name
+        self.clones = str(Path(self.tmp) / "clones")
+        self.alpha = _make_remote(self.tmp, "alpha", {"wiki/index.md": "# ALPHA\n\nsecret of ALPHA\n"})
+        self.bravo = _make_remote(self.tmp, "bravo", {"wiki/index.md": "# BRAVO\n\nsecret of BRAVO\n"})
+
+    def _corpus(self, url):
+        return DocsCorpus({"proj": {"url": url, "branch": "master"}}, self.clones, pull_interval_sec=0.0)
+
+    def test_two_repos_under_one_project_name_do_not_share_a_clone(self):
+        a, b = self._corpus(self.alpha), self._corpus(self.bravo)
+        self.assertIn("ALPHA", a.get("wiki/index.md", _ctx("proj"))["text"])
+        self.assertIn("BRAVO", b.get("wiki/index.md", _ctx("proj"))["text"])
+        # ... and A still serves ALPHA after B has fetched and reset its own clone.
+        self.assertIn("ALPHA", self._corpus(self.alpha).get("wiki/index.md", _ctx("proj"))["text"])
+
+    def test_the_clone_directories_are_distinct_on_disk(self):
+        self._corpus(self.alpha).get("wiki/index.md", _ctx("proj"))
+        self._corpus(self.bravo).get("wiki/index.md", _ctx("proj"))
+        dirs = sorted(p.name for p in Path(self.clones).iterdir() if p.is_dir())
+        self.assertEqual(len(dirs), 2, dirs)
+        self.assertTrue(all(d.startswith("proj-") for d in dirs), dirs)
+
+
+class SnapshotConsistencyTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = self._tmp.name
+        self.clones = str(Path(self.tmp) / "clones")
+        self.remote = _make_remote(self.tmp, "r", {"wiki/x.md": "# FIRST\n"})
+
+    def test_the_documents_come_from_the_commit_the_snapshot_names(self):
+        # `ls-tree` used to re-resolve the literal "HEAD" rather than the sha
+        # captured moments earlier, so a snapshot could carry one commit's head
+        # and another commit's documents. Simulated by moving HEAD underneath
+        # the read, which is what a second process sharing the clone does.
+        corpus = DocsCorpus({"p": {"url": self.remote, "branch": "master"}}, self.clones,
+                            pull_interval_sec=0.0)
+        corpus.get("wiki/x.md", _ctx("p"))          # first refresh, clone exists
+        dest = [p for p in Path(self.clones).iterdir() if p.is_dir()][0]
+
+        original = corpus._load_docs
+
+        def move_head_then_load(d, commit):
+            # Another writer advances the working clone between rev-parse and ls-tree.
+            _write_files(str(d), {"wiki/x.md": "# SECOND\n"})
+            _sh(str(d), "git", "-c", "user.email=t@e.com", "-c", "user.name=T", "add", "-A")
+            _sh(str(d), "git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "moved")
+            return original(d, commit)
+
+        corpus._snapshots.clear()
+        corpus._load_docs = move_head_then_load
+        text = corpus.get("wiki/x.md", _ctx("p"))["text"]
+        self.assertIn("FIRST", text, "documents came from a commit the snapshot does not name")
 
 
 class FixturePortabilityTests(unittest.TestCase):

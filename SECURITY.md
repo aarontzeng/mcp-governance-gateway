@@ -167,6 +167,17 @@ instance count, and concurrent credential enrollment can lose a record — or,
 worse, undo a revocation, which the paragraph below describes. Run one active
 instance until that state moves to shared storage.
 
+**`DOCS_CLONE_DIR` belongs to one instance, and this one is not a degraded
+guarantee.** Two gateways sharing that directory both `fetch` and
+`reset --hard` the same working tree. Until 0.2.1 the clone was keyed by
+project NAME alone, so two instances whose repos files mapped one project name
+to different repositories shared a directory and each served the other's
+documents under its own configured corpus — content across a tenant boundary,
+and undetectable downstream because the snapshot's recorded commit and its
+documents came from different commits. The key now includes the repository url,
+which makes that collision impossible; two instances with the SAME url still
+race over one working tree, so give each instance its own directory.
+
 Worth stating more sharply than "can lose a record", because one case is
 fail-OPEN rather than fail-safe: the credential store's read-modify-write is
 serialized by a `threading.Lock` on the instance, not by a lock on the FILE. Two

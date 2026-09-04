@@ -15,6 +15,7 @@ existed, so `docs.get` cannot be used to probe the repo tree.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -217,7 +218,14 @@ class DocsCorpus:
         # writes on a coarse-mtime filesystem, and an atomic write swaps in a new
         # inode every time.
         self._repos_file = repos_file
-        self._registry = _Registry(generation=0, repos=dict(repos), signature=self._repos_file_sig())
+        # Signature deliberately EMPTY rather than stat'd here. The caller read
+        # the file before constructing us, so stamping it now would pair the
+        # content read THEN with the signature as of NOW: an edit landing in
+        # that window would be recorded as already-seen and never picked up --
+        # not late, never, since `_current_registry` returns early on a matching
+        # signature. An empty tuple can never equal a real stat, so the first
+        # lookup reloads once and publishes the true signature.
+        self._registry = _Registry(generation=0, repos=dict(repos), signature=())
 
     def _repos_file_sig(self) -> tuple:
         if not self._repos_file:
@@ -435,7 +443,15 @@ class DocsCorpus:
         # past the error boundary, and one that changed it produced a snapshot built
         # from two different specifications.
         project, url, branch = spec.project, spec.url, spec.branch
-        dest = os.path.join(self._clone_dir, project)
+        # Keyed by project AND url. Keyed by project alone, two gateways whose
+        # repos files map the same project name to DIFFERENT repositories shared
+        # one directory, and each served the other's documents under its own
+        # configured corpus -- a cross-tenant content leak rather than a
+        # degraded guarantee. The url digest makes that collision impossible.
+        # It does not make the directory safe to SHARE between instances: two
+        # gateways with the SAME url still fetch and hard-reset one working
+        # tree. DOCS_CLONE_DIR belongs to one instance; see SECURITY.md.
+        dest = os.path.join(self._clone_dir, f"{project}-{_url_key(url)}")
         if not os.path.isdir(os.path.join(dest, ".git")):
             os.makedirs(self._clone_dir, exist_ok=True)
             # Full history, not --depth 1. Per-file provenance needs the first commit
@@ -457,20 +473,26 @@ class DocsCorpus:
                 self._git(dest, "fetch", "origin", branch)
             self._git(dest, "reset", "--hard", "FETCH_HEAD")
         head = self._git(dest, "rev-parse", "HEAD").strip()
-        docs = self._load_docs(dest)
+        docs = self._load_docs(dest, head)
         return _Snapshot(
             head=head, docs=docs, index=_Bm25Index(list(docs.values())),
             refreshed_at=time.monotonic(), spec=spec.fingerprint,
         )
 
-    def _load_docs(self, dest: str) -> dict[str, _Doc]:
+    def _load_docs(self, dest: str, commit: str) -> dict[str, _Doc]:
         # Read the tree, not the working directory. `ls-tree` carries each entry's
         # mode, so symlinks (120000) and submodules (160000) are dropped before
         # anything is opened: `open()` on a checked-out symlink follows it, and a
         # docs commit could point `wiki/x.md` at any file on the gateway host.
         # Content then comes from the object store by blob id, so no path under
         # the clone is ever opened by name.
-        listing = self._git(dest, "ls-tree", "-r", "-l", "-z", "HEAD").split("\0")
+        # The COMMIT captured by the caller, never the literal "HEAD". Re-resolving
+        # it here read whatever HEAD pointed at by then, so a snapshot could carry
+        # one commit's sha and another commit's documents -- internally
+        # inconsistent, and nothing downstream could detect it. Two processes
+        # sharing a clone directory is how that happens in practice; the
+        # per-project lock only serialises refreshes inside one process.
+        listing = self._git(dest, "ls-tree", "-r", "-l", "-z", commit).split("\0")
         wanted: list[tuple[str, str, int]] = []
         oids: dict[str, str] = {}
         total = 0
@@ -609,6 +631,16 @@ def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
             entry["review"] = review
         repos[str(project)] = entry
     return repos
+
+
+def _url_key(url: str) -> str:
+    """A short, filesystem-safe digest of a repo url, for the clone directory.
+
+    Not a secret and not collision-critical: it exists so two different
+    repositories cannot land on one directory, and 12 hex characters of SHA-256
+    is far past what that needs.
+    """
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
 
 
 def _normalize(path: str) -> str:
