@@ -46,11 +46,15 @@ And the observations that establish both facts were made against one specific
 backend version; publishing them as a general claim about that project, rather
 than reporting them upstream, would be the wrong way round.
 
-## CI: build history and controlled rerun
+## CI: controlled rerun
 
-`ci.status` reports the last build only, which cannot answer "is this test
-flaky" or "when did this start failing". A read-only `ci.builds` (last N builds
-per job) needs no new trust surface and unlocks both.
+`ci.builds` now answers "is this test flaky" and "when did this start failing"
+within the last N builds it returns — a job red for longer than that window
+still looks the same as one red since its first build, and a project-wide call
+across more jobs than the row budget returns one build each, which answers
+neither question and is the point at which to name a job. It reuses the read
+allowlist and the read quota; what it adds is volume, not a new class of
+disclosure: a series of results and durations rather than a single row.
 
 A rerun tool is a genuine write: it consumes build resources. It would need the
 confirmation gate, a dedicated role, and a **trigger allowlist separate from the

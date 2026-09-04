@@ -277,10 +277,29 @@ class StatusTests(unittest.TestCase):
         out = fake.status(_ctx())
         self.assertEqual(out["jobs"][0]["result"], "BUILDING")
 
+    def test_the_last_build_row_carries_the_same_iso_time_as_the_history_rows(self):
+        # ci.status and ci.builds share one row normalizer so they cannot drift.
+        # They already had: the listing rejected a non-string `result` while this
+        # row passed one through (review, 2026-09-04).
+        import json as _json
+        fake = FakeJenkins(replies={"/api/json": _json.dumps(
+            dict(LAST_BUILD, result=42, timestamp=1780000000000)).encode()})
+        row = fake.status(_ctx())["jobs"][0]
+        self.assertEqual(row["startedAt"], "2026-05-28T20:26:40Z")
+        self.assertEqual(row["result"], "UNKNOWN")   # a non-string result is not a result
+
     def test_job_with_no_builds_is_unknown_not_error(self):
         fake = FakeJenkins(replies={"/api/json": CiBackendError("CI HTTP 404", status=404)})
         out = fake.status(_ctx())
         self.assertEqual(out["jobs"][0]["result"], "UNKNOWN")
+
+    def test_a_never_built_job_has_the_same_keys_as_a_built_one(self):
+        # Two shapes from one tool is work pushed onto every caller. The
+        # never-built row carries the same keys with nulls.
+        built = FakeJenkins().status(_ctx())["jobs"][0]
+        never = FakeJenkins(replies={"/api/json": CiBackendError("CI HTTP 404", status=404)}).status(_ctx())["jobs"][0]
+        self.assertEqual(set(built), set(never))
+        self.assertIsNone(never["startedAt"])
 
     def test_project_without_jobs_rejected(self):
         with self.assertRaises(CiBackendError):
@@ -338,6 +357,191 @@ class _ListAudit(AuditSink):
         self.events.append(event)
 
 
+class BuildHistoryTests(unittest.TestCase):
+    """ci.builds over a fake Jenkins.
+
+    The reply shapes here are the ones a real Jenkins 2.531 returned when this was
+    written: rows newest first, `result` a string, `timestamp`/`duration` in ms, and
+    an extra `_class` key the parser must ignore rather than choke on.
+    """
+
+    def _fake(self, rows, jobs=None):
+        import json as _json
+        payload = _json.dumps({"builds": rows}).encode()
+        return FakeJenkins(jobs=jobs, replies={"tree=builds": payload})
+
+    def _rows(self, n, first=30):
+        return [
+            {"_class": "hudson.model.FreeStyleBuild", "number": first - i, "result": "SUCCESS",
+             "building": False, "timestamp": 1780000000000 + i, "duration": 20 + i}
+            for i in range(n)
+        ]
+
+    def _one(self, out):
+        self.assertEqual(out["count"], 1)
+        return out["jobs"][0]
+
+    def test_history_comes_back_newest_first_and_normalized(self):
+        job = self._one(self._fake(self._rows(3)).builds("swarm-build", _ctx()))
+        self.assertEqual(job["job"], "swarm-build")
+        self.assertEqual([b["build"] for b in job["builds"]], [30, 29, 28])
+        self.assertEqual(job["builds"][0]["result"], "SUCCESS")
+        self.assertEqual(job["builds"][0]["durationMs"], 20)
+        self.assertEqual(job["count"], 3)
+
+    def test_time_is_reported_as_iso_beside_the_raw_jenkins_milliseconds(self):
+        # Every other timestamp this gateway emits is ISO-8601, and this is the one
+        # tool whose whole payload is time; an agent comparing builds to "this week"
+        # should not have to know Jenkins speaks epoch ms.
+        job = self._one(self._fake(self._rows(1)).builds("swarm-build", _ctx()))
+        self.assertEqual(job["builds"][0]["timestamp"], 1780000000000)
+        self.assertEqual(job["builds"][0]["startedAt"], "2026-05-28T20:26:40Z")
+
+    def test_the_job_endpoint_is_asked_with_a_bounded_range(self):
+        fake = self._fake(self._rows(3))
+        fake.builds("swarm-build", _ctx())
+        self.assertIn("/job/swarm-build/api/json?tree=builds[", fake.paths[-1])
+        self.assertTrue(fake.paths[-1].endswith("{0,10}"))  # the schema's declared default
+        fake.builds("swarm-build", _ctx(), count=999)
+        self.assertTrue(fake.paths[-1].endswith("{0,50}"))  # capped, never the caller's number
+        fake.builds("swarm-build", _ctx(), count=0)
+        self.assertTrue(fake.paths[-1].endswith("{0,1}"))   # 0 means zero, not "unspecified"
+
+    def test_a_server_that_returns_more_rows_than_asked_is_still_bounded(self):
+        # This is the OUTPUT contract, not a defence against an unbounded fetch:
+        # a listing over the 512KB read cap is cut mid-JSON and never reaches here.
+        job = self._one(self._fake(self._rows(30)).builds("swarm-build", _ctx(), count=4))
+        self.assertEqual(job["count"], 4)
+        self.assertEqual([b["build"] for b in job["builds"]], [30, 29, 28, 27])
+
+    def test_malformed_entries_are_dropped_rather_than_served(self):
+        rows = [
+            None,                                   # a null in the list
+            "not-a-dict",
+            {"result": "SUCCESS"},                  # no number
+            {"number": True, "result": "SUCCESS"},  # bool is an int in Python
+            {"number": 0, "result": "SUCCESS"},
+            {"number": "12", "result": "SUCCESS"},  # a string number is not a number
+            {"number": 7, "result": "SUCCESS", "building": False},
+        ]
+        job = self._one(self._fake(rows).builds("swarm-build", _ctx()))
+        self.assertEqual([b["build"] for b in job["builds"]], [7])
+
+    def test_a_non_numeric_time_from_the_ci_server_becomes_null_not_a_list(self):
+        rows = [{"number": 9, "result": "SUCCESS", "timestamp": [], "duration": {"x": 1}}]
+        build = self._one(self._fake(rows).builds("swarm-build", _ctx()))["builds"][0]
+        self.assertIsNone(build["timestamp"])
+        self.assertIsNone(build["startedAt"])
+        self.assertIsNone(build["durationMs"])
+
+    def test_a_nan_or_infinite_time_does_not_escape_the_error_boundary(self):
+        # `json.loads` accepts the non-standard NaN/Infinity literals, and
+        # `int(nan)` raises a ValueError that is NOT a CiBackendError -- so this
+        # used to surface as a 500 rather than a tool error. (Review, 2026-09-04.)
+        import json as _json
+        raw = b'{"builds": [{"number": 9, "result": "SUCCESS", "timestamp": NaN, "duration": Infinity}]}'
+        self.assertTrue(_json.loads(raw))  # the literal really does parse
+        build = self._one(FakeJenkins(replies={"tree=builds": raw}).builds("swarm-build", _ctx()))["builds"][0]
+        self.assertIsNone(build["timestamp"])
+        self.assertIsNone(build["durationMs"])
+
+    def test_a_nonsense_epoch_leaves_the_iso_field_null_rather_than_failing(self):
+        rows = [{"number": 9, "result": "SUCCESS", "timestamp": 10 ** 25}]
+        build = self._one(self._fake(rows).builds("swarm-build", _ctx()))["builds"][0]
+        self.assertEqual(build["timestamp"], 10 ** 25)
+        self.assertIsNone(build["startedAt"])
+
+    def test_a_listing_that_is_not_a_list_is_empty_not_an_error(self):
+        # The fixture must be NON-ITERABLE. A dict or a string would let this test
+        # pass with the `isinstance(entries, list)` guard deleted -- iterating a
+        # dict yields its keys and iterating a string yields characters, both of
+        # which the per-entry check then drops. (Found by review, 2026-09-04.)
+        for not_a_list in (5, None, True, {"oops": 1}, "nope"):
+            job = self._one(self._fake(not_a_list).builds("swarm-build", _ctx()))
+            self.assertEqual(job["builds"], [])
+
+    def test_building_and_missing_results_are_named_not_null(self):
+        rows = [{"number": 9, "building": True, "result": None},
+                {"number": 8, "building": False, "result": None},
+                {"number": 7, "building": False, "result": 42}]
+        job = self._one(self._fake(rows).builds("swarm-build", _ctx()))
+        self.assertEqual([b["result"] for b in job["builds"]], ["BUILDING", "UNKNOWN", "UNKNOWN"])
+
+    def test_foreign_and_nonexistent_jobs_are_indistinguishable(self):
+        fake = self._fake(self._rows(1))
+        with self.assertRaises(CiBackendError) as a:
+            fake.builds("someone-elses-job", _ctx())
+        with self.assertRaises(CiBackendError) as b:
+            fake.builds("no-such-job-anywhere", _ctx())
+        self.assertEqual(str(a.exception), str(b.exception))
+        self.assertEqual(a.exception.status, 404)
+        self.assertEqual(fake.paths, [])  # refused before any request reached the CI server
+
+    def test_a_project_with_no_jobs_cannot_read_history(self):
+        for job in ("swarm-build", None):
+            with self.assertRaises(CiBackendError):
+                self._fake(self._rows(1)).builds(job, _ctx(project="proj-b"))
+
+
+class ProjectWideHistoryTests(unittest.TestCase):
+    """`job` omitted: the whole project in one call.
+
+    The motivating question -- "which of my jobs regressed" -- is project-shaped.
+    Requiring a job name would make an agent answer it with one call per job, each
+    spending its own read quota and producing its own audit event.
+    """
+
+    def _fake(self, jobs, rows=3):
+        import json as _json
+        payload = _json.dumps({"builds": [
+            {"number": 30 - i, "result": "SUCCESS", "building": False,
+             "timestamp": 1780000000000, "duration": 20} for i in range(rows)]}).encode()
+        return FakeJenkins(jobs=jobs, replies={"tree=builds": payload})
+
+    def test_every_allowlisted_job_is_reported_in_one_call(self):
+        out = self._fake({"proj-a": ["swarm-build", "swarm-lint"]}).builds(None, _ctx())
+        self.assertEqual(out["count"], 2)
+        self.assertEqual([j["job"] for j in out["jobs"]], ["swarm-build", "swarm-lint"])
+        self.assertEqual(out["jobs"][0]["count"], 3)
+
+    def test_a_blank_job_name_means_the_whole_project_not_an_error(self):
+        out = self._fake({"proj-a": ["swarm-build", "swarm-lint"]}).builds("   ", _ctx())
+        self.assertEqual(out["count"], 2)
+
+    def test_many_jobs_share_one_row_budget(self):
+        names = [f"job-{i}" for i in range(40)]
+        fake = self._fake({"proj-a": names})
+        fake.builds(None, _ctx(), count=50)
+        # 200 // 40 == 5 per job, not the 50 that was asked for.
+        self.assertTrue(all(p.endswith("{0,5}") for p in fake.paths), fake.paths[:2])
+        self.assertEqual(len(fake.paths), 40)
+
+    def test_more_jobs_than_the_budget_degrade_to_one_row_each(self):
+        # Integer division floors to 0 past the budget and `max(1, ...)` catches it,
+        # so the total is then bounded by the allowlist rather than by the budget --
+        # the same width ci.status already returns. Stated rather than hidden.
+        names = [f"job-{i}" for i in range(250)]
+        fake = self._fake({"proj-a": names})
+        out = fake.builds(None, _ctx(), count=50)
+        self.assertTrue(all(p.endswith("{0,1}") for p in fake.paths))
+        self.assertEqual(out["count"], 250)
+
+    def test_one_job_missing_on_the_ci_server_does_not_fail_the_project(self):
+        # Allowlisted but renamed or deleted on Jenkins: `status()` already reports
+        # that job as UNKNOWN rather than failing the listing, and so does this.
+        fake = FakeJenkins(jobs={"proj-a": ["gone", "swarm-lint"]},
+                           replies={"tree=builds": CiBackendError("CI HTTP 404", status=404)})
+        out = fake.builds(None, _ctx())
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(out["jobs"][0], {"job": "gone", "builds": [], "count": 0})
+
+    def test_an_unavailable_ci_server_is_still_an_error(self):
+        fake = FakeJenkins(jobs={"proj-a": ["swarm-build"]},
+                           replies={"tree=builds": CiBackendError("CI HTTP 500", status=500)})
+        with self.assertRaises(CiBackendError):
+            fake.builds(None, _ctx())
+
+
 class GatewayCiTests(unittest.TestCase):
     def setUp(self):
         self.audit = _ListAudit()
@@ -361,6 +565,41 @@ class GatewayCiTests(unittest.TestCase):
         lb = self.app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, self.pb)
         self.assertIn("ci.status", {t["name"] for t in la["result"]["tools"]})
         self.assertNotIn("ci.status", {t["name"] for t in lb["result"]["tools"]})
+
+    def test_builds_through_gateway_with_audit(self):
+        import json as _json
+        rows = [{"number": 5, "result": "FAILURE", "building": False}]
+        app = GatewayApp(memory_backend=_NullMemory(), audit_sink=self.audit,
+                         ci_backend=FakeJenkins(replies={"tree=builds": _json.dumps({"builds": rows}).encode()}))
+        resp = app.handle_rpc(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "ci.builds", "arguments": {"job": "swarm-build"}}}, self.pa)
+        self.assertEqual(resp["result"]["structuredContent"]["jobs"][0]["builds"][0]["build"], 5)
+        self.assertEqual(self.audit.events[-1].tool, "ci.builds")
+        self.assertEqual(self.audit.events[-1].outcome, "ok")
+
+    def test_the_project_wide_call_is_one_quota_tick_and_one_audit_event(self):
+        import json as _json
+        app = GatewayApp(memory_backend=_NullMemory(), audit_sink=self.audit,
+                         ci_backend=FakeJenkins(replies={"tree=builds": _json.dumps(
+                             {"builds": [{"number": 5, "result": "FAILURE"}]}).encode()}))
+        reads: list = []
+        original = app._memory_write_limiter.check_read
+        app._memory_write_limiter.check_read = lambda p: (reads.append(p) or original(p))
+        before = len(self.audit.events)
+        resp = app.handle_rpc(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "ci.builds", "arguments": {}}}, self.pa)
+        self.assertEqual(resp["result"]["structuredContent"]["count"], 2)   # both jobs
+        self.assertEqual(len(self.audit.events) - before, 1)
+        self.assertEqual(len(reads), 1)   # one quota tick for the whole project
+
+    def test_builds_is_offered_and_refused_on_the_same_terms_as_the_rest_of_the_family(self):
+        la = self.app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, self.pa)
+        lb = self.app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, self.pb)
+        self.assertIn("ci.builds", {t["name"] for t in la["result"]["tools"]})
+        self.assertNotIn("ci.builds", {t["name"] for t in lb["result"]["tools"]})
+        self.assertTrue(self._call(self.pb, "ci.builds", {"job": "swarm-build"})["result"].get("isError"))
 
     def test_other_project_gets_clean_error_not_data(self):
         resp = self._call(self.pb, "ci.log", {"job": "swarm-build"})

@@ -58,7 +58,7 @@ deliberately not MCP tools:
 | Credential store | Per-user downstream keys, AES-256-GCM at rest, AAD-bound to the actor and backend (ADR-0009) |
 | Secret scan | Reject credential-shaped values on team-visible, append-only writes |
 | Docs corpus | Per-project git repo mirror: BM25 search, hot-reloaded config, author provenance (ADR-0011, ADR-0015) |
-| CI adapter | Read-only status/log plus artifact listing, behind a server-side project→jobs allowlist |
+| CI adapter | Read-only status, build history, log tail and artifact listing, behind a server-side project→jobs allowlist |
 
 ## Request Flow
 

@@ -37,7 +37,7 @@ _ISSUE_WRITE_ROLE = "issue_writer"
 # token's project claim (the corpus map is keyed by project — no new role needed).
 _DOCS_TOOLS = frozenset({"docs.search", "docs.get", "docs.list"})
 # CI tools are read-only; tenancy is the server-side project->jobs allowlist.
-_CI_TOOLS = frozenset({"ci.status", "ci.log", "ci.artifact"})
+_CI_TOOLS = frozenset({"ci.status", "ci.log", "ci.builds", "ci.artifact"})
 
 
 @dataclass(frozen=True)
@@ -395,6 +395,9 @@ class GatewayApp:
         if name == "ci.log":
             job = _required_text(arguments, "job", max_len=200)
             return self._ci_backend.log(job, context, _optional_int(arguments, "lines", minimum=1, maximum=1000))
+        if name == "ci.builds":
+            job = _optional_text(arguments, "job", max_len=200)
+            return self._ci_backend.builds(job, context, _optional_int(arguments, "count", minimum=1, maximum=50))
         if name == "ci.artifact":
             job = _required_text(arguments, "job", max_len=200)
             build = _optional_int(arguments, "build", minimum=1, maximum=1_000_000_000)
@@ -832,6 +835,25 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "lines": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200},
                 },
                 "required": ["job"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ci.builds",
+            "description": (
+                "Recent build history, newest first (read-only): build number, result, startedAt "
+                "and duration per build. Omit `job` to get every job in the project — that is the "
+                "call for 'which of my jobs regressed'; name a job to look at one in more depth. "
+                "This is a last-N view: a job that has been red for longer than `count` builds "
+                "looks the same as one red since its first build. Across many jobs the per-job "
+                "count is silently reduced to share one row budget."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job": {"type": "string", "description": "Omitted (or blank) means every job in this project."},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                },
                 "additionalProperties": False,
             },
         },

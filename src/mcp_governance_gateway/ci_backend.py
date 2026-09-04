@@ -1,4 +1,4 @@
-"""Jenkins CI backend: read-only `ci.status` / `ci.log` (roadmap Phase 7).
+"""Jenkins CI backend: read-only `ci.status` / `ci.builds` / `ci.log` / `ci.artifact`.
 
 Tenancy: Jenkins jobs carry no project concept, so the boundary is a
 server-side map `project -> [job names]` (like the docs corpus's repo map).
@@ -18,6 +18,8 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import math
+from datetime import datetime, timezone
 from typing import Any
 from urllib import error, parse, request
 
@@ -27,6 +29,11 @@ from .memory_backend import RequestContext
 _MAX_LOG_FETCH_BYTES = 512_000     # bounded read of consoleText
 _MAX_LOG_LINES = 1000
 _DEFAULT_LOG_LINES = 200
+_MAX_BUILD_COUNT = 50
+_DEFAULT_BUILD_COUNT = 10
+# One shared budget for the project-wide fan-out: 30 jobs x 50 builds is not an
+# answer, it is a denial of the agent's own context window.
+_MAX_TOTAL_BUILD_ROWS = 200
 STREAM_CHUNK = 64 * 1024           # artifact download stream chunk (see server.py)
 _BUILD_ALIASES = ("lastSuccessfulBuild", "lastBuild")  # non-numeric build refs we accept
 
@@ -55,6 +62,95 @@ def _listed_artifact_paths(payload: dict[str, Any]) -> list[str]:
             continue
         paths.append(rel)
     return paths
+
+
+def _build_ms(value: object) -> int | None:
+    """A Jenkins millisecond field, or None when it is not a usable number.
+
+    Copying the field through untyped let a `"timestamp": []` in the CI server's
+    reply become a list in an MCP result; the listing is untrusted input like any
+    other backend response.
+
+    The `isfinite` check is not theoretical: `json.loads` accepts the non-standard
+    `NaN` and `Infinity` literals by default, and `int(nan)` raises a ValueError
+    that is not a CiBackendError -- so a CI server emitting one would have escaped
+    the error boundary as a 500 rather than a clean tool error.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return int(value)
+
+
+def _normalize_build_row(entry: object) -> dict[str, Any] | None:
+    """One build, as this gateway reports builds — or None if the entry is unusable.
+
+    Shared by `ci.status` and `ci.builds` so the two cannot drift: they had already
+    started to, with the listing rejecting a non-string `result` and the last-build
+    row passing one through.
+
+    `startedAt` is the field to reason with. Jenkins speaks epoch milliseconds and
+    every other timestamp this gateway emits is ISO-8601 (`audit.utc_now_iso`,
+    memory `createdAt`, issue `updatedAt`), which matters most in a tool whose
+    whole payload is time. The raw `timestamp` stays beside it because `ci.status`
+    has emitted it since 0.1.0 and removing it would break a caller for tidiness.
+    """
+    if not isinstance(entry, dict):
+        return None
+    number = entry.get("number")
+    # bool is an int in Python, so a JSON `true` would otherwise surface as build #1.
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        return None
+    building = bool(entry.get("building"))
+    result = entry.get("result")
+    started_ms = _build_ms(entry.get("timestamp"))
+    return {
+        "build": number,
+        "result": ("BUILDING" if building else (result if isinstance(result, str) and result else "UNKNOWN")),
+        "building": building,
+        "timestamp": started_ms,
+        "startedAt": _iso_from_ms(started_ms),
+        "durationMs": _build_ms(entry.get("duration")),
+    }
+
+
+def _iso_from_ms(millis: int | None) -> str | None:
+    if millis is None:
+        return None
+    try:
+        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None  # a nonsense epoch from the CI server is not a reason to fail the read
+
+
+def _listed_builds(payload: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    """The build rows from a job's build listing, newest first.
+
+    Two bounds, doing two different jobs. The `{0,N}` suffix in the query is what
+    keeps the *fetch* small on a Jenkins that understands it. This slice bounds
+    the *answer* -- it is what holds the output contract when a server returns
+    more rows than were asked for. It is NOT a defence against an unbounded
+    listing: `_fetch` reads at most 512KB, so a listing larger than that is cut
+    mid-JSON and surfaces as "CI returned invalid JSON" before this runs. That
+    is fail-closed, and it is the honest description of the bound.
+    """
+    entries = payload.get("builds")
+    rows: list[dict[str, Any]] = []
+    for entry in entries if isinstance(entries, list) else []:
+        row = _normalize_build_row(entry)
+        if row is None:
+            continue
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+# The never-built row carries the SAME keys as a real one, with nulls. A caller
+# that has to branch on which keys are present is a caller we made work for.
+_NEVER_BUILT = {"build": None, "result": "UNKNOWN", "building": False,
+                "timestamp": None, "startedAt": None, "durationMs": None}
 
 
 def _safe_build_ref(build: object) -> str:
@@ -140,6 +236,47 @@ class JenkinsHttpBackend:
             "lines": tail,
             "truncated": len(raw) >= _MAX_LOG_FETCH_BYTES,
         }
+
+    def builds(self, job: str | None, context: RequestContext, count: int | None = None) -> dict[str, Any]:
+        """Recent build history, newest first, for one job or for the whole project.
+
+        `ci.status` answers "is it green now". This answers "is this flaky" and
+        "when did it start failing", within the window it returns -- a job red for
+        longer than `count` builds looks the same as one red since the beginning,
+        which is a real limit of a last-N view and is stated in the tool text.
+
+        `job` is optional for the same reason `ci.status` takes no job at all: the
+        question that motivates this tool ("which of my jobs regressed") is
+        project-shaped, and requiring a job name would make an agent answer it
+        with one call per job, each costing its own quota tick and audit event.
+        Omitted, it walks the project's allowlist and shares one row budget so a
+        project with many jobs still cannot produce an unbounded result.
+        """
+        per_job = max(1, min(int(_DEFAULT_BUILD_COUNT if count is None else count), _MAX_BUILD_COUNT))
+        if job is None or not str(job).strip():
+            names = list(self._project_jobs(context))
+            per_job = max(1, min(per_job, _MAX_TOTAL_BUILD_ROWS // len(names)))
+        else:
+            names = [self._require_allowlisted(job, context)]
+        return {"jobs": [self._job_builds(name, per_job) for name in names], "count": len(names)}
+
+    def _job_builds(self, name: str, limit: int) -> dict[str, Any]:
+        try:
+            data = self._request_json(
+                f"/job/{parse.quote(name, safe='')}/api/json"
+                f"?tree=builds[number,result,building,timestamp,duration]{{0,{limit}}}"
+            )
+        except CiBackendError as exc:
+            if exc.status == 404:
+                # Allowlisted but absent from Jenkins (renamed, deleted). One such
+                # job must not fail the whole project's answer -- the same call
+                # `status()` already makes for the same reason. The cost is that a
+                # deleted job and one that has never run are the same answer here,
+                # exactly as they are both UNKNOWN to `ci.status`.
+                return {"job": name, "builds": [], "count": 0}
+            raise
+        rows = _listed_builds(data, limit)
+        return {"job": name, "builds": rows, "count": len(rows)}
 
     def artifacts(self, job: str, context: RequestContext, build: object = None) -> dict[str, Any]:
         """One build's artifacts, metadata only, each with a gateway download URL.
@@ -233,17 +370,12 @@ class JenkinsHttpBackend:
             )
         except CiBackendError as exc:
             if exc.status == 404:  # job exists in config but has no builds / was renamed
-                return {"job": name, "build": None, "result": "UNKNOWN", "building": False}
+                return {"job": name, **_NEVER_BUILT}
             raise
-        result = data.get("result")
-        return {
-            "job": name,
-            "build": data.get("number"),
-            "result": ("BUILDING" if data.get("building") else (result or "UNKNOWN")),
-            "building": bool(data.get("building")),
-            "timestamp": data.get("timestamp"),
-            "durationMs": data.get("duration"),
-        }
+        row = _normalize_build_row(data)
+        if row is None:  # a reply with no usable build number reads as "never built"
+            return {"job": name, **_NEVER_BUILT}
+        return {"job": name, **row}
 
     def _request_json(self, path: str) -> dict[str, Any]:
         raw = self._fetch(path)

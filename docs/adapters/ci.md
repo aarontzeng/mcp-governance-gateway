@@ -1,7 +1,7 @@
 # CI Adapter (Jenkins, read-only)
 
-`ci.status` / `ci.log` / `ci.artifact` over Jenkins. Read-only by design — a
-rerun tool would be a separate item and would need the confirmation gate.
+`ci.status` / `ci.builds` / `ci.log` / `ci.artifact` over Jenkins. Read-only by
+design — a rerun tool is a separate item and would need the confirmation gate.
 
 ## Tenancy
 
@@ -14,12 +14,30 @@ not it exists on the instance — no existence oracle over Jenkins.
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `ci.status` | — | `jobs[] {job,build,result,building,timestamp,durationMs}` (`result`: SUCCESS/FAILURE/BUILDING/UNKNOWN…) |
+| `ci.status` | — | `jobs[] {job,build,result,building,timestamp,startedAt,durationMs}` (`result`: SUCCESS/FAILURE/BUILDING/UNKNOWN…) |
+| `ci.builds` | `job` (**optional** — omitted means every job in the project), `count` (1–50, default 10) | `{jobs[] {job,builds[] {build,result,building,timestamp,startedAt,durationMs},count},count}`, newest first |
 | `ci.log` | `job`, `lines` (1–1000, default 200) | last-build console tail `{job,build,result,lines[],truncated}` |
 | `ci.artifact` | `job`, `build` (optional, default last successful) | `{job,build,artifacts[] {fileName,relativePath,download}}` — metadata plus a per-file `download` URL, **never bytes** |
 
+`ci.builds` is a **last-N view**: a job that has been red for longer than
+`count` builds is indistinguishable from one red since its first build. With
+`job` omitted it walks the project's allowlist in one call — the shape of the
+question it exists for — and the per-job count is reduced so the history stays
+within one shared row budget of 200. The floor is one row per job, so a project
+with more than 200 allowlisted jobs gets one build each and the answer is then
+as wide as `ci.status` already is: the budget bounds the *depth* of the history,
+the allowlist bounds the *width*, and neither bounds the other.
+
+Like `ci.status`, a project-wide call makes one Jenkins request per allowlisted
+job, sequentially, so its worst case is the job count times `JENKINS_TIMEOUT_SEC`.
+Both tools share that shape; keep the allowlist to the jobs a project actually
+watches.
+
+`startedAt` is the ISO-8601 field to reason with; the raw Jenkins `timestamp`
+(epoch ms) is kept beside it because `ci.status` has emitted it since 0.1.0.
+
 Logs are size-capped (bounded 512KB fetch, tail only): console output can
-embed anything a build printed. These three tool calls share the per-user read
+embed anything a build printed. These four tool calls share the per-user read
 quota and are audited like every other tool — the artifact **download** is a
 separate endpoint with its own limits and its own audit event, described below.
 
