@@ -492,3 +492,23 @@ class PerBackendRecordTests(unittest.TestCase):
         self.assertEqual(st.get("10000001", backend="redmine"), (KeyState.OK, "ACTOR1-OLD-KEY"))
         self.assertEqual(st.get("10000001", backend="gitlab"), (KeyState.OK, "ACTOR1-GITLAB-TOKEN"))
         self.assertEqual(st.get("10000002", backend="redmine"), (KeyState.OK, "ACTOR2-OLD-KEY"))
+
+    def test_a_backend_named_ct_is_not_mistaken_for_a_legacy_record(self):
+        # A nested map is {backend: record}, and a LEGACY record is a record --
+        # so a backend literally named "ct" made the two indistinguishable if
+        # legacy detection only asked whether the key was present. The
+        # consequence was not a wrong read: `set()` rebuilt the actor's map from
+        # what it took to be one legacy record and DROPPED every other backend,
+        # which is the exact bug this nesting exists to prevent, reintroduced for
+        # one backend name. A record's `ct` is a base64 string; a nested map's
+        # value is a dict, so the TYPE is what tells them apart.
+        st = self.store()
+        st.set(_ACTOR, "SECRET-FOR-CT", "alice", backend="ct")
+        self.assertEqual(self.store().get(_ACTOR, backend="ct"), (KeyState.OK, "SECRET-FOR-CT"))
+
+        self.store().set(_ACTOR, "SECRET-FOR-REDMINE", "alice", backend="redmine")
+        self.assertEqual(self.store().get(_ACTOR, backend="ct"), (KeyState.OK, "SECRET-FOR-CT"))
+        self.assertEqual(self.store().get(_ACTOR, backend="redmine"), (KeyState.OK, "SECRET-FOR-REDMINE"))
+
+        self.assertTrue(self.store().clear(_ACTOR, backend="ct"))
+        self.assertEqual(self.store().get(_ACTOR, backend="redmine"), (KeyState.OK, "SECRET-FOR-REDMINE"))

@@ -141,11 +141,26 @@ class RedmineKeyStore:
             print(f"credential store reload failed; keeping the last-good records: {exc}", file=sys.stderr, flush=True)
         self._sig = sig
 
+    @staticmethod
+    def _is_legacy_flat(raw: dict) -> bool:
+        """A pre-nesting record: one credential stored directly under the actor.
+
+        The `ct` value must be a STRING, not merely present. A nested map is
+        `{backend: record}`, so a backend NAMED "ct" would otherwise look exactly
+        like a legacy record -- and the consequence is not a wrong read, it is
+        silent credential loss: `set()` would rebuild the actor's map from what
+        it took to be one legacy record and drop every other backend, which is
+        the bug this nesting exists to fix, reintroduced for one backend name.
+        A record's `ct` is always a base64 string; a nested map's value is always
+        a dict, so the type is what tells them apart.
+        """
+        return isinstance(raw.get("ct"), str)
+
     def _get_record(self, actor: str, backend: str) -> dict | None:
         raw = self._records.get(actor)
         if not isinstance(raw, dict):
             return None
-        if "ct" in raw:
+        if self._is_legacy_flat(raw):
             if (raw.get("backend") or "redmine") == backend:
                 return raw
             return None
@@ -226,7 +241,7 @@ class RedmineKeyStore:
             self._reload()
             records = dict(self._records)
             raw = records.get(actor)
-            if isinstance(raw, dict) and "ct" in raw:
+            if isinstance(raw, dict) and self._is_legacy_flat(raw):
                 legacy_backend = raw.get("backend") or "redmine"
                 actor_map = {legacy_backend: raw}
             elif isinstance(raw, dict):
@@ -249,7 +264,7 @@ class RedmineKeyStore:
                 self._atomic_write(records)
                 return True
             records = dict(self._records)
-            if "ct" in raw:
+            if self._is_legacy_flat(raw):
                 legacy_backend = raw.get("backend") or "redmine"
                 if legacy_backend != backend:
                     return False
