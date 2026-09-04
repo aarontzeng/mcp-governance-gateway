@@ -170,8 +170,10 @@ audit identity at once; it is not a drop-in second adapter.
 ## Hardening checklist
 
 - Serve behind TLS; restrict the listener to trusted networks.
-- Give each backend credential the narrowest scope that works (a read-only CI
-  token, a project-scoped issue account).
+- Give each backend credential the narrowest scope that works (a project-scoped
+  issue account; a CI token that can read the jobs on `CI_JOBS_FILE`, and can
+  trigger builds only if you configure `CI_TRIGGER_JOBS_FILE` — without that
+  file the gateway never POSTs to Jenkins, so a read-only CI token is right).
 - Rotate the keystore master key and backend service credentials periodically.
   Multiple master keys mean a rotation does not force users to re-enroll; it does
   still require a restart to load the new key.

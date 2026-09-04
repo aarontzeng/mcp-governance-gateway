@@ -82,8 +82,8 @@ class Settings:
     # re-enroll a key, so the message can point somewhere instead of describing
     # an endpoint the user has to go find. Unset -> those errors carry no URL.
     credential_portal_url: str | None = None
-    # Jenkins CI (read-only ci.status/ci.builds/ci.log/ci.artifact). Enabled when
-    # url + jobs file are set.
+    # Jenkins CI. Reads (ci.status/ci.builds/ci.log/ci.artifact) are enabled when
+    # url + jobs file are set; ci.rerun additionally needs ci_trigger_jobs_file.
     jenkins_base_url: str | None = None
     jenkins_user: str | None = None
     jenkins_token: str | None = None

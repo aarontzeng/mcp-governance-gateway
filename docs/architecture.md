@@ -10,7 +10,7 @@ MCP host / agent  (per-user bearer token, ADR-0007)
   -> TLS ingress
   -> gateway  /mcp        authn / policy / confirmation / audit
   -> private backends     memory service, issue tracker,
-                          per-project docs repos, read-only CI
+                          per-project docs repos, CI (reads + gated rerun)
 ```
 
 The gateway is the single enforcement point. That is safe because it enforces

@@ -87,13 +87,26 @@ def load_master_keys(path: str | Path) -> tuple[str | None, dict[str, bytes]]:
 
 
 class RedmineKeyStore:
-    """Per-user Redmine API keys, encrypted at rest (AES-256-GCM), indexed by actor (employee id).
+    """Per-user downstream credentials, encrypted at rest (AES-256-GCM).
 
-    Owned by the adapter (single UID reads and writes it, so no cross-UID setgid
-    dance). Each record is
-    ``{"ct": base64(nonce||ciphertext||tag), "key_id": "<mk>", "redmine_login": "...", "updated_at": "..."}``.
-    The actor is bound in as AES-GCM associated data, so a record cannot be moved
-    to another actor even by someone who can edit the file.
+    Indexed by ``(actor, backend)``: an actor may hold a Redmine API key and a
+    GitLab token at once, and enrolling one must not disturb the other. On disk
+    that is ``{"keys": {"<actor>": {"<backend>": <record>}}}``; the pre-nesting
+    shape ``{"keys": {"<actor>": <record>}}`` is still read, forever, because
+    those ciphertexts exist on deployed machines.
+
+    Each record is ``{"ct": base64(nonce||ciphertext||tag), "key_id": "<mk>",
+    "backend": "...", "login": "...", "updated_at": "..."}``. Actor AND backend
+    are bound in as AES-GCM associated data, so a record cannot be moved to
+    another actor or relabelled as another backend's credential even by someone
+    who can edit the file. Legacy records carry no ``backend`` field and stay
+    bound to the actor alone.
+
+    Owned by the adapter: a single UID reads and writes it, which is why the file
+    is 0600 and there is no cross-UID setgid dance.
+
+    The name is historical -- it served only Redmine once. Renaming the module is
+    a separate change from making it hold several backends.
     """
 
     def __init__(
@@ -286,7 +299,14 @@ class RedmineKeyStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(self._path.parent), prefix=".rk-", suffix=".tmp")
         try:
-            os.fchmod(fd, 0o640)  # tighten before writing so it is never briefly world-readable
+            # 0600, before any bytes, so the ciphertext is never briefly readable
+            # by anyone else. It was 0640, which this class's own docstring argues
+            # against: a single UID reads and writes this file, so there is no
+            # group that needs it, and `os.replace` means an upgrade tightens an
+            # existing store on its next write. The token store `mcpgw-admin`
+            # writes has always been 0600; these two hold the same class of
+            # secret and should not differ.
+            os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w") as f:
                 json.dump({"keys": records}, f, ensure_ascii=False, indent=2)
                 f.flush()

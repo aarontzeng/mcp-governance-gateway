@@ -493,6 +493,17 @@ class PerBackendRecordTests(unittest.TestCase):
         self.assertEqual(st.get("10000001", backend="gitlab"), (KeyState.OK, "ACTOR1-GITLAB-TOKEN"))
         self.assertEqual(st.get("10000002", backend="redmine"), (KeyState.OK, "ACTOR2-OLD-KEY"))
 
+    def test_the_store_file_is_owner_only(self):
+        # It was 0640, which this class's own docstring argues against: a single
+        # UID reads and writes it, so no group needs it, and the token store the
+        # admin CLI writes has always been 0600. Two files holding the same class
+        # of secret should not differ.  (Review, 2026-09-04.)
+        import stat as _stat
+        self.store().set(_ACTOR, "secretkey", "jdoe")
+        self.assertEqual(_stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.store().set(_ACTOR, "another", "jdoe", backend="gitlab")
+        self.assertEqual(_stat.S_IMODE(self.path.stat().st_mode), 0o600)
+
     def test_a_backend_named_ct_is_not_mistaken_for_a_legacy_record(self):
         # A nested map is {backend: record}, and a LEGACY record is a record --
         # so a backend literally named "ct" made the two indistinguishable if

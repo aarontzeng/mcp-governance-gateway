@@ -62,7 +62,7 @@ Authorization: Bearer <the caller's own MCP token>
 
 The endpoint authenticates the caller's **own bearer token** — no per-user CI
 credential to provision, which is the point: the gateway already holds a
-read-only CI account, and handing each user their own would reintroduce exactly
+single CI account, and handing each user their own would reintroduce exactly
 the credential sprawl this gateway exists to remove. It fetches from Jenkins
 server-side with that account (which never leaves the process) and streams the
 bytes back.

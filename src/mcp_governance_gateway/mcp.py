@@ -403,6 +403,11 @@ class GatewayApp:
     ) -> dict[str, Any]:
         if self._ci_backend is None:
             raise DocsBackendError("CI is not enabled on this gateway", status=404)
+        # ci.rerun pays this too, unlike issues.create which takes no quota at
+        # all. Deliberate, and the asymmetry is worth stating: a build trigger
+        # spends a shared resource, so a bound on how fast one can be asked for
+        # is a feature rather than an oversight -- and both passes of the
+        # two-step count, which is the honest price of the gate.
         self._enforce_read_quota(principal)
         if name == "ci.status":
             return self._ci_backend.status(context)
