@@ -34,6 +34,26 @@ revise it, comment on it, read it back. There is no `merge`, no `approve`, no
 `delete_branch`, no `push`. Answer (3): adding one is a code change to a file
 whose docstring says why it must not happen, not a misconfiguration.
 
+**And answer (3) alone is not the property.** It makes the GATEWAY unable to
+publish, which is the part this project can own. The property as a whole needs
+two more things that belong to the deployment, and stating only the first would
+be overclaiming:
+
+- **The credential must not be able to publish.** The enrolled token is the
+  caller's own. If it carries more than "open a pull request", the power to
+  merge exists even though this code never uses it. The narrowest token that
+  works is Contents: read/write and Pull requests: read/write on that ONE
+  repository; the 428 a caller gets before enrolling now says exactly that,
+  because otherwise people enrol whatever the host's UI calls "read and write".
+- **The repository must not let the author merge unreviewed.** Otherwise the
+  person who publishes is the same identity that proposed, and the separation is
+  a second browser tab rather than a second principal.
+
+An agent talking only to this gateway cannot publish under any settings: the
+credential never leaves the process, so the agent holds the gateway's tools and
+not the token. What the other two protect against is the human's own token being
+used elsewhere, and a repository where proposing and publishing are one act.
+
 Answer (1) was rejected because a policy check is a thing that can be wrong: a
 default, an inverted condition, a deployment that sets a flag it does not
 understand. Answer (2) is real and complementary — a deployment should give the

@@ -40,6 +40,13 @@ _DOCS_READ_TOOLS = frozenset({"docs.search", "docs.get", "docs.list", "docs.revi
 # caller's own credential, and there is no tool that merges one. Two roles
 # because they are different acts -- writing a document and giving an opinion
 # on someone else's -- and a deployment may well grant only the second.
+#
+# The split is real HERE and not on the host: both roles resolve the same
+# `docs-<type>` credential, so a reviewer-only grant stops docs.create through
+# this gateway while the review host still sees one write-capable identity.
+# Giving the comment path its own credential slot would let a deployment enrol a
+# genuinely comment-only token; it would also make everyone enrol twice, so it
+# waits for someone who wants it (roadmap).
 _DOCS_WRITE_TOOLS = frozenset({"docs.create", "docs.update"})
 _DOCS_REVIEW_TOOLS = frozenset({"docs.review_comment"})
 _DOCS_WRITE_ROLE = "docs_writer"
@@ -67,13 +74,13 @@ class PolicyDecision:
 
 
 class Policy:
-    # Phase 1 authorization is a project-scoped, exact-match allow-list. Memory tools
-    # are allowed for any token that carries a project; issue tools additionally
-    # require the token to carry an issue_project (the tenant boundary for the issue
-    # tracker), and issue writes require the issue_writer role. Roles beyond that one
-    # are carried on the Principal but not interpreted: general RBAC is deferred (see
-    # roadmap Phase 5). Everything else is denied, and destructive operations are
-    # always denied.
+    # A project-scoped, exact-match allow-list. Memory tools are allowed for any
+    # token that carries a project; issue tools additionally require an
+    # issue_project (the tenant boundary for the tracker). Four roles are
+    # interpreted, each gating one kind of write: issue_writer, ci_runner,
+    # docs_writer and docs_reviewer. Roles beyond those four are carried on the
+    # Principal and not interpreted -- general RBAC is still deferred. Everything
+    # else is denied, and destructive operations are always denied.
     _ALLOWED_MEMORY_TOOLS = frozenset({"memory.search", "memory.save", "memory.list", "memory.lesson_save", "memory.lesson_list", "memory.action_create", "memory.action_list", "memory.action_update_status"})
     _DESTRUCTIVE_SUFFIXES = ("delete", "destroy", "purge", "remove")
 
@@ -931,7 +938,8 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "Propose a NEW document as a change on this project's review host (two-step: call "
                 "once for a confirmationId, then again with `confirm`). It does NOT publish — it "
                 "opens a proposal under YOUR OWN identity for a person to merge or reject. Refused "
-                "if the path already exists; use docs.update for that."
+                "if the path already exists (use docs.update), if the path is not a .md file "
+                "under a served directory, or if the body contains something credential-shaped."
             ),
             "inputSchema": {
                 "type": "object",
@@ -951,7 +959,8 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "Propose a change to an EXISTING document (two-step, like docs.create). Send the "
                 "`sha` that docs.get returned for it: if the document moved since you read it the "
                 "proposal is refused rather than overwriting someone's edit. Opens a proposal under "
-                "your own identity; publishing stays a human action."
+                "your own identity; publishing stays a human action. Refused if the body contains "
+                "something credential-shaped."
             ),
             "inputSchema": {
                 "type": "object",

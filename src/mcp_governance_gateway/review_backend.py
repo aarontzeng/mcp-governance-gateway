@@ -4,9 +4,29 @@ This is the seam the docs write path hangs on, and the shape of it is the whole
 governance property. There are four operations: open a change, revise it,
 comment on it, read it back. There is no `merge`, no `approve`, no
 `delete_branch`, no `push` to a protected ref, and no way to add one without
-editing this file — an agent can propose and advise, and only a person can
-publish. That is enforced by the absence of a method rather than by a policy
-check somebody could misconfigure.
+editing this file.
+
+Be exact about what that buys, because "an agent may propose, only a person may
+publish" needs THREE things and this file is only the first:
+
+1. **The gateway cannot publish.** No method, so no configuration mistake and no
+   policy inversion can make it. That is this file's job and it is done here.
+2. **The credential must not be able to publish.** The enrolled token is the
+   caller's own, and if it carries more than "open a pull request" then the
+   *power* to merge exists even though this code never uses it. Scope is the
+   deployment's to get right; `docs/adapters/docs.md` names the smallest token
+   that works.
+3. **The repository must not let the author merge unreviewed.** If it does, the
+   "person who publishes" is the same GitHub identity that proposed, and the
+   separation is a second browser tab rather than a second principal.
+
+An agent talking only to this gateway cannot publish under any of those
+conditions — the credential never leaves the process, so the agent has the
+gateway's tools and not the token. What (2) and (3) protect against is the
+*human's own* token being used elsewhere, and a repository configured so that
+proposing and publishing are the same act. Neither is something this file can
+enforce, and saying "enforced by the absence of a method" full stop was
+overclaiming.
 
 Two consequences of going through a review host's REST API rather than pushing
 from the corpus clone, both worth having on purpose:

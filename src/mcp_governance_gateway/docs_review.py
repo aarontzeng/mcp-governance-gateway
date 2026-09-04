@@ -181,8 +181,10 @@ class DocsReviewService:
         if state is not KeyState.OK or not personal:
             raise ReviewBackendError(
                 "proposing a document change is done under your own identity on the review host, so it "
-                "needs your own credential -- there is no shared account to fall back to. Enroll one and "
-                "try again" + hint,
+                "needs your own credential -- there is no shared account to fall back to. Enroll a "
+                f"token scoped to {spec.repo!r} ALONE with Contents: read/write and Pull requests: "
+                "read/write, and nothing else -- not admin, not workflow: that is all these tools use, "
+                "and a broader token can merge its own proposals" + hint,
                 status=428,
             )
         return personal

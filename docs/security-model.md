@@ -47,8 +47,13 @@ project token.
 - Validate every external input at the gateway boundary.
 - Default to deny when policy is absent or ambiguous.
 - Deny rules override allow and confirmation rules.
-- Do not pass MCP client tokens to downstream services.
-- Keep downstream credentials server-side.
+- Do not pass MCP client tokens to downstream services. A caller's *enrolled
+  downstream credential* is a different thing and is deliberately forwarded —
+  that is what the credential store exists for, and what makes a docs proposal
+  or an issue note carry the person's own name rather than a service account's.
+  The gateway's own bearer token never leaves it.
+- Keep downstream credentials server-side: encrypted at rest, bound to
+  (actor, backend), and sent only to the backend they were enrolled for.
 - Log decisions, not secrets.
 - Treat tool metadata and downstream content as untrusted.
 - Treat identity headers as untrusted unless the request path is authenticated.

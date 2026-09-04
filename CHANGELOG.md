@@ -58,9 +58,13 @@ All notable changes to this project are recorded here. The format follows
 - **The docs corpus write path (ADR-0017)** — `docs.create`, `docs.update`,
   `docs.review_comment` and `docs.review_get`. A write does not publish: it
   opens or revises a **pull request** on the project's review host, under the
-  **caller's own credential**, and there is no tool that merges one. That is
-  enforced by the review-backend interface having no merge, approve or push
-  method rather than by a policy check. A comment is a plain comment: verified
+  **caller's own credential**, and there is no tool that merges one — the
+  review-backend interface has no merge, approve or push method, so no
+  configuration mistake can produce one. That makes the *gateway* unable to
+  publish; the property as a whole also needs a narrowly-scoped enrolled token
+  and a repository that does not let an author merge their own pull request
+  unreviewed, both of which are the deployment's (ADR-0017 says which, and the
+  enrolment refusal now names the exact token scope). A comment is a plain comment: verified
   against GitHub that it creates no review and cannot satisfy a
   required-approvals rule.
 
