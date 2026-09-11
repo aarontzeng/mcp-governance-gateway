@@ -18,6 +18,7 @@ from .audit import AuditEvent, AuditSink, JsonLinesAuditSink
 from .auth import AuthError, BearerTokenAuthenticator, IdentityVerifier
 from .config import Settings
 from .docs_review import DocsReviewService
+from .docs_assets import AssetStage, AssetStageError, MAX_ASSET_BYTES
 from .review_backend import GitHubReviewBackend
 from .oidc import CompositeAuthenticator, GrantsFile, JwksCache, OidcAuthenticator, discover_jwks_url
 from .ci_backend import (
@@ -76,6 +77,7 @@ class GatewayHTTPServer(ThreadingHTTPServer):
     internal_api: InternalApi | None = None
     keystore: RedmineKeyStore | None = None
     ci_backend: JenkinsHttpBackend | None = None  # for the /ci/artifact download route
+    asset_stage: AssetStage | None = None
     audit_sink: AuditSink | None = None            # artifact transfers are audited here
     artifact_max_bytes: int = 256 * 1024 * 1024
     artifact_streams: "threading.Semaphore" = threading.Semaphore(4)
@@ -138,6 +140,46 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 self._ci_artifact_download()
                 return
             self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
+
+        def do_PUT(self) -> None:
+            # Close even on refusal: an unread upload must never become the next
+            # request on a persistent connection. Tokens are never logged.
+            self.close_connection = True
+            stage = self.server.asset_stage
+            match = re.fullmatch(r"/docs/asset-stage/([A-Za-z0-9_-]+)", self.path)
+            if not self.server.serves_mcp or stage is None or match is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            try:
+                principal = self.server.authenticator.authenticate_header(self.headers.get("Authorization"))
+                principal = self.server.identity_verifier.resolve(self.headers.get, principal)
+            except AuthError:
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+            if not is_origin_allowed(self.headers.get("Origin"), self.server.allowed_origins):
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "origin denied"})
+                return
+            lengths = self.headers.get_all("Content-Length", [])
+            if (self.headers.get_all("Transfer-Encoding", []) or len(lengths) != 1
+                    or not lengths[0].isascii() or not lengths[0].isdigit()):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "one Content-Length is required"})
+                return
+            length = int(lengths[0])
+            if length > MAX_ASSET_BYTES:
+                self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "upload exceeds size limit"})
+                return
+            try:
+                data = self.rfile.read(length)
+                if len(data) != length:
+                    raise AssetStageError("incomplete upload body")
+                result = stage.accept_upload(match[1], data, principal.actor, principal.project, principal.token_id)
+            except (TimeoutError, OSError):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "incomplete upload body"})
+                return
+            except AssetStageError as exc:
+                self._send_json(exc.status, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.CREATED, result)
 
         def _ci_artifact_download(self) -> None:
             # The artifact fetch ci.artifact points at. Authenticated by the caller's
@@ -577,6 +619,8 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
             credential_portal_url=settings.credential_portal_url,
         )
 
+    asset_stage = (AssetStage(settings.docs_asset_base_url)
+                   if docs_review is not None and settings.docs_asset_base_url else None)
     audit_sink = JsonLinesAuditSink()
     app = GatewayApp(
         memory_backend=memory_backend,
@@ -586,9 +630,11 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
         docs_corpus=docs_corpus,
         ci_backend=ci_backend,
         docs_review=docs_review,
+        asset_stage=asset_stage,
     )
     server = GatewayHTTPServer((settings.host, settings.port), make_handler())
     server.app = app
+    server.asset_stage = asset_stage
     server.authenticator = authenticator
     server.identity_verifier = IdentityVerifier(
         secret=settings.identity_claims_secret or "",

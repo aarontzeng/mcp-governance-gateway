@@ -4,7 +4,35 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] — 2026-09-11
+
+### Docs corpus
+
+- `docs.review_list` lists open corpus proposals, newest updated first, with author ownership and a bounded result count.
+- `docs.review_add_reviewer` requests a named account's review idempotently, behind `docs_reviewer` and a confirmation bound to change and reviewer.
+- `docs.review_abandon` lets a `docs_writer` withdraw their own open proposal after confirmation, with an optional stamped comment; no branch deletion, no merge, no approve.
+- `docs.lint` reports missing titles, broken relative Markdown links and duplicate slugs from the served snapshot, including on read-only corpora; findings, never a verdict.
+- `docs.asset_stage_url` plus a bearer-authenticated PUT route stage up to 2 MiB of UTF-8 Markdown for `contentStaged` create/update proposals: one-shot 60 s upload URL, 3600 s stage, per-user quotas, ownership bound to actor, project and token, consumed on a successful proposal and reusable after a failed one.
+- Staged uploads resolve signed forwarded identity exactly as `/mcp` does.
+- Two projects can no longer map the same docs repo URL (case-insensitive); ADR-0017 amended for the seven-operation review interface.
+
+### Issues
+
+- `issues.create` and `issues.update_status` accept `startDate`, `dueDate` (YYYY-MM-DD, field-aware errors) and `priority` (name → id); on GitLab all planning fields are refused loudly rather than dropped.
+- `issues.get` / `issues.mine` rows carry `priority` (lower-cased name or null) and `dueDate` (or null); GitLab rows: priority null, due date passed through.
+
+### CI
+
+- `ci.stop` cancels a queued item or stops a build, behind the same `ci_runner` role, trigger allowlist and confirmation as `ci.rerun`; queue ownership is checked before any cancellation.
+
+### Memory
+
+- `memory.lesson_list` and `memory.action_list` fetch a bounded project window (5 000) from the backend before filtering and paging, so the backend's default page can no longer hide a project's rows; results report `total` and `truncated`.
+
+### Operations
+
+- `scripts/mcpgw-token-backup.sh`: a daily, lock-guarded, shrink-refusing archive of the user-token store.
+- `scripts/check-tokens-intact.sh`: snapshot before a deploy, verify after — no issued token may disappear, change, or stop authenticating.
 
 ## [0.2.0] — 2026-09-04
 

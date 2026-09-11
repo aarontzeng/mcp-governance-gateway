@@ -42,7 +42,7 @@ from .redmine_keystore import KeyState
 # Fields with no GitLab equivalent wired here. Refused by name on every write path:
 # silently dropping a field the caller asked to set is worse than refusing it, and a
 # refusal that only some paths perform is the same bug with a smaller blast radius.
-_REDMINE_ONLY_FIELDS = ("dueDate", "priority", "parentIssue", "category")
+_REDMINE_ONLY_FIELDS = ("startDate", "dueDate", "priority", "parentIssue", "category")
 
 
 def _reject_redmine_only(fields: dict[str, Any], where: str) -> None:
@@ -50,7 +50,7 @@ def _reject_redmine_only(fields: dict[str, Any], where: str) -> None:
     if present:
         raise ValueError(
             f"GitLab issues do not support {', '.join(present)} via {where} "
-            "(dueDate/priority/parentIssue/category are Redmine-only in this gateway)"
+            "(startDate/dueDate/priority/parentIssue/category are Redmine-only in this gateway)"
         )
 
 
@@ -333,6 +333,9 @@ class GitLabHttpBackend(IssueBackend):
             "category": None,  # GitLab has no category concept (see categories())
             "assignee": assignee,
             "doneRatio": None,
+            "priority": None,
+            "startDate": None,
+            "dueDate": issue.get("due_date") or None,
             "updatedAt": issue.get("updated_at"),
         }
 

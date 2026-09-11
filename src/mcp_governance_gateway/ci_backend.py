@@ -1,5 +1,5 @@
 """Jenkins CI backend: `ci.status` / `ci.builds` / `ci.log` / `ci.artifact` (read)
-and `ci.rerun` (a write, behind its own allowlist, role and confirmation gate).
+and `ci.rerun` / `ci.stop` (writes behind a separate allowlist and confirmation).
 
 Tenancy: Jenkins jobs carry no project concept, so the boundary is a
 server-side map `project -> [job names]` (like the docs corpus's repo map).
@@ -7,7 +7,7 @@ A token only sees and reads its project's allowlisted jobs; asking for any
 other job returns the same "unknown job" error whether it exists or not —
 no existence oracle over the Jenkins instance.
 
-Everything but `ci.rerun` is read-only. `ci.rerun` consumes build resources, so it
+The two writes control build resources, so each
 sits behind a SECOND allowlist -- the set of jobs an agent may start is not the set
 it may watch -- a dedicated role, and the confirmation gate.
 
@@ -357,6 +357,43 @@ class JenkinsHttpBackend:
             "queueUrl": location or None,
             "alreadyQueued": _already_queued(queue_id, before),
         }
+
+    def stop(self, job: str, context: RequestContext, *, queue_item: int | None = None,
+             build: int | None = None) -> dict[str, Any]:
+        """Cancel an explicit target so stopping never guesses which build was intended."""
+        name = self.require_triggerable(job, context)
+        if (queue_item is None) == (build is None):
+            raise CiBackendError("pass exactly one of queueItem or build", status=400)
+        target = queue_item if queue_item is not None else build
+        field = "queueItem" if queue_item is not None else "build"
+        if isinstance(target, bool) or not isinstance(target, int) or target < 1:
+            raise CiBackendError(f"{field} must be a positive integer", status=400)
+        if queue_item is not None:
+            # Queue ids are global: the job allowlist alone cannot authorize this POST.
+            self._require_queue_item_belongs_to(queue_item, name)
+            self._post(f"/queue/cancelItem?id={queue_item}")
+        else:
+            self._post(f"/job/{parse.quote(name, safe='')}/{build}/stop")
+        return {"job": name, "cancelled": field, field: target}
+
+    def _require_queue_item_belongs_to(self, queue_item: int, job: str) -> None:
+        """Fail closed when a queued item's owner cannot be established."""
+        try:
+            data = self._request_json(f"/queue/item/{queue_item}/api/json?tree=task[name,url]")
+        except CiBackendError:
+            raise CiBackendError(
+                "cannot verify queue item; it may have started, so use its build number",
+                status=409,
+            ) from None
+        task = data.get("task")
+        # `name` alone is the unqualified leaf: a folder or multibranch job named
+        # `build` reports the same name as the top-level `build` this gateway can
+        # allowlist. The task URL is qualified, and a top-level job's is exactly
+        # `job/<name>/` — anything else is another job wearing the same name.
+        url = task.get("url") if isinstance(task, dict) else None
+        if (not isinstance(task, dict) or task.get("name") != job
+                or not isinstance(url, str) or url.strip("/") != f"job/{parse.quote(job, safe='')}"):
+            raise CiBackendError("queue item is not a build of this job", status=404)
 
     def artifacts(self, job: str, context: RequestContext, build: object = None) -> dict[str, Any]:
         """One build's artifacts, metadata only, each with a gateway download URL.

@@ -89,6 +89,19 @@ class DocsReviewService:
         spec, backend, credential = self._resolve(context)
         return backend.get_change(spec, change_ref, credential, context)
 
+    def list(self, limit: int, context: RequestContext) -> dict[str, Any]:
+        spec, backend, credential = self._resolve(context)
+        return backend.list_changes(spec, limit, credential, context)
+
+    def add_reviewer(self, change_ref: int, reviewer: str, context: RequestContext) -> dict[str, Any]:
+        spec, backend, credential = self._resolve(context)
+        return backend.add_reviewer(spec, change_ref, reviewer, credential, context)
+
+    def abandon(self, change_ref: int, message: str | None, context: RequestContext) -> dict[str, Any]:
+        spec, backend, credential = self._resolve(context)
+        body = stamped(message, context) if message and message.strip() else None
+        return backend.close_change(spec, change_ref, body, credential, context)
+
     # --- internals -------------------------------------------------------
 
     def _require_servable(self, path: str) -> None:

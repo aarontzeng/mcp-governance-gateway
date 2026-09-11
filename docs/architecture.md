@@ -35,11 +35,12 @@ be written against a gateway that does not exist yet.
 The gateway supports the current MCP lifecycle and capability negotiation, and
 advertises only the tools allowed for the authenticated actor and project.
 
-Two routes exist outside `/mcp`, both authenticated by the same bearer token and
+Three route families exist outside `/mcp`, authenticated by the same bearer token and
 deliberately not MCP tools:
 
 | Route | Why not a tool |
 |---|---|
+| `PUT /docs/asset-stage/<upload-token>` | Uploads Markdown bytes outside agent context; bound to the minting actor, project and token, with the same signed identity propagation as `/mcp`. |
 | `GET /ci/artifact` | Returns raw bytes. A build artifact is routinely tens of megabytes, which belongs on disk, not in an agent's context. |
 | `/internal/*` | Credential enrollment: a user submits their own downstream key. Scoped strictly to the caller's own actor. **It must not be routed by a public ingress** — it accepts personal secrets, and its integration contract is not yet defined (see the roadmap). |
 
@@ -59,7 +60,7 @@ deliberately not MCP tools:
 | Secret scan | Reject credential-shaped values on team-visible, append-only writes |
 | OIDC (optional) | Verify an IdP's access token, `sub` → actor; tenancy from a deployment-owned grants file (ADR-0016) |
 | Docs corpus | Per-project git repo mirror: BM25 search, hot-reloaded config, author provenance (ADR-0011, ADR-0015) |
-| Docs review | Proposals as pull requests under the caller's own credential; four operations and no way to merge one (ADR-0017) |
+| Docs review | Proposals as pull requests under the caller's own credential; seven operations and no way to merge one (ADR-0017) |
 | CI adapter | Status, build history, log tail and artifact listing behind a server-side project→jobs allowlist; `ci.rerun` behind a second, narrower trigger allowlist plus a role and the confirmation gate |
 
 ## Request Flow

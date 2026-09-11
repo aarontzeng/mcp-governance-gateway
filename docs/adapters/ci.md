@@ -1,7 +1,7 @@
 # CI Adapter (Jenkins)
 
 `ci.status` / `ci.builds` / `ci.log` / `ci.artifact` read Jenkins.
-`ci.rerun` starts a build, and is the only tool here that changes anything.
+`ci.rerun` starts a build and `ci.stop` cancels or stops one; nothing else here changes anything.
 
 ## Tenancy
 
@@ -25,6 +25,19 @@ same 404 a foreign job gets.
 | `ci.builds` | `job` (**optional** — omitted means every job in the project), `count` (1–50, default 10) | `{jobs[] {job,builds[] {build,result,building,timestamp,startedAt,durationMs},count},count}`, newest first |
 | `ci.log` | `job`, `lines` (1–1000, default 200) | last-build console tail `{job,build,result,lines[],truncated}` |
 | `ci.rerun` | `job`, `confirm` | `{job,queueItem,queueUrl,alreadyQueued}` — **confirmation-gated**, needs the `ci_runner` role and the trigger allowlist |
+| `ci.stop` | `job`, exactly one of `queueItem` / `build`, `confirm` | `{job,queueItem}` or `{job,build}` — **confirmation-gated**, same `ci_runner` role and trigger allowlist as `ci.rerun` |
+
+`ci.stop` is `ci.rerun`'s counterpart and is listed only where `ci.rerun` is
+(a trigger allowlist configured and the `ci_runner` role held). It cancels a
+queued item or stops a running build; pass exactly one of `queueItem` or
+`build`. Queue ids are global in Jenkins, so the job allowlist alone cannot
+authorise a cancellation: before posting, the gateway reads the queue item and
+refuses unless its task URL is exactly that top-level, allowlisted job (`job/<name>/`;
+a folder or multibranch job with the same leaf name is not it) — a foreign, missing
+or unreadable item never cancels. The confirmation binds the exact target, so a
+confirmation issued for one build or item cannot be spent on another. An item
+that has already started is no longer in the queue and must be stopped by
+build number. Every call is audited with `job:target` as the resource.
 
 `alreadyQueued` is three-valued. `true` is the only certain answer: the queue item existed before the trigger, so this call added nothing. `false` means only that it was not seen beforehand — another client can queue the same job in the window between the read and the trigger. `null` means the queue could not be read at all. Rounding the last two to `false` is what makes an agent wait for a distinct build that never arrives.
 

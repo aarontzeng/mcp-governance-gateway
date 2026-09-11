@@ -10,8 +10,7 @@ from urllib import error, parse, request
 from .auth import Principal
 
 _MAX_RESPONSE_BYTES = 2_000_000
-# Upper bound on how many memories memory.list pulls from the backend before
-# filtering to the caller's project (the backend does not filter server-side).
+# Upper bound on list fetches before gateway filtering and pagination.
 _LIST_FETCH_MAX = 5_000
 
 
@@ -293,8 +292,9 @@ class HttpMemoryBackend(MemoryBackend):
         return result
 
     def lesson_list(self, limit: int, context: RequestContext) -> dict[str, Any]:
-        # agentmemory /lessons filters by project server-side; re-filter defensively.
-        raw = self._get(self._lesson_path, {"project": context.project})
+        # Ask for a bounded project window explicitly: the backend's default
+        # page would otherwise hide rows before confidence sorting and the cap.
+        raw = self._get(self._lesson_path, {"project": context.project, "limit": _LIST_FETCH_MAX})
         items = raw.get("lessons") if isinstance(raw, dict) else None
         if not isinstance(items, list):
             items = []
@@ -304,9 +304,11 @@ class HttpMemoryBackend(MemoryBackend):
         # non-numeric confidence sorts last rather than raising: this is a listing,
         # and one malformed record must not take the whole list down.
         scoped.sort(key=lambda lesson: -_as_number(lesson.get("confidence")))
+        total = len(scoped)
         scoped = scoped[:limit]
         labels = self._labels()
-        return {"lessons": [self._label_named(_normalize_lesson(lesson), labels) for lesson in scoped], "count": len(scoped)}
+        return {"lessons": [self._label_named(_normalize_lesson(lesson), labels) for lesson in scoped],
+                "count": len(scoped), "total": total, "truncated": len(items) >= _LIST_FETCH_MAX}
 
     def action_create(self, title: str, description: str | None, priority: str | None, context: RequestContext) -> dict[str, Any]:
         # An action is a project-scoped follow-up (status pending->active->done/blocked).
@@ -327,8 +329,9 @@ class HttpMemoryBackend(MemoryBackend):
         return result
 
     def action_list(self, limit: int, context: RequestContext, include_done: bool = False) -> dict[str, Any]:
-        # agentmemory /actions filters by project server-side; re-filter defensively.
-        raw = self._get(self._action_path, {"project": context.project})
+        # Fetch beyond the backend's default page before excluding completed
+        # actions, so that page cannot hide the project's open work.
+        raw = self._get(self._action_path, {"project": context.project, "limit": _LIST_FETCH_MAX})
         items = raw.get("actions") if isinstance(raw, dict) else None
         if not isinstance(items, list):
             items = []
@@ -337,9 +340,11 @@ class HttpMemoryBackend(MemoryBackend):
             # The default is the LIVE board (pending/active/blocked): done actions
             # are history and must not crowd open ones out of the limit window.
             scoped = [action for action in scoped if action.get("status") != "done"]
+        total = len(scoped)
         scoped = scoped[:limit]
         labels = self._labels()
-        return {"actions": [self._label_named(_normalize_action(action), labels) for action in scoped], "count": len(scoped)}
+        return {"actions": [self._label_named(_normalize_action(action), labels) for action in scoped],
+                "count": len(scoped), "total": total, "truncated": len(items) >= _LIST_FETCH_MAX}
 
     def action_update_status(self, action_id: str, status: str, context: RequestContext) -> dict[str, Any]:
         # The backend update endpoint (`/actions/update`, a POST) takes only an actionId,
@@ -348,7 +353,7 @@ class HttpMemoryBackend(MemoryBackend):
         # get/update verify the issue belongs to the token's project (cross-project => 404).
         # The project is checked on each row as well as sent as a filter: the
         # filter is the backend's promise, the row check is this side's own.
-        raw = self._get(self._action_path, {"project": context.project})
+        raw = self._get(self._action_path, {"project": context.project, "limit": _LIST_FETCH_MAX})
         items = raw.get("actions") if isinstance(raw, dict) else None
         if not isinstance(items, list) or not any(
             isinstance(a, dict) and a.get("id") == action_id and a.get("project") == context.project

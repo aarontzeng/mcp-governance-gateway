@@ -80,6 +80,7 @@ class Settings:
     # Timeout for calls to a docs review host (GitHub/GitLab), separate from the
     # corpus git timeout: one is a remote API, the other a local clone.
     docs_review_timeout_sec: float = 20.0
+    docs_asset_base_url: str | None = None
     # Where a user enrolls their own downstream credential (the deployment's
     # portal / admin page). Appended to the errors that ask a caller to enroll or
     # re-enroll a key, so the message can point somewhere instead of describing
@@ -177,6 +178,7 @@ class Settings:
             docs_clone_dir=os.environ.get("DOCS_CLONE_DIR") or None,
             docs_pull_interval_sec=float(os.environ.get("DOCS_PULL_INTERVAL_SEC", "300")),
             docs_review_timeout_sec=_timeout_env("DOCS_REVIEW_TIMEOUT_SEC", default=20.0),
+            docs_asset_base_url=_url_env("DOCS_ASSET_BASE_URL"),
             jenkins_base_url=_url_env("JENKINS_BASE_URL"),
             jenkins_user=os.environ.get("JENKINS_USER") or None,
             jenkins_token=os.environ.get("JENKINS_TOKEN") or None,

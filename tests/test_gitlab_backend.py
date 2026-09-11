@@ -57,6 +57,27 @@ class GetTests(unittest.TestCase):
         self.assertEqual(out["assignee"], {"id": "5", "displayName": "Alice"})
         self.assertIsNone(out["doneRatio"])
 
+    def test_read_planning_fields_keep_due_date_and_null_priority(self):
+        for due in ("2026-09-01", None):
+            with self.subTest(due=due):
+                fake = FakeGitLab({("GET", "/projects/42/issues/7"): dict(ISSUE, due_date=due)})
+                row = fake.get("7", _ctx())
+                self.assertEqual(row["dueDate"], due)
+                self.assertIsNone(row["priority"])
+                self.assertIsNone(row["startDate"])   # GitLab has no start date
+
+    def test_start_date_is_refused_on_both_writes(self):
+        for operation in ("create", "update_status"):
+            with self.subTest(operation=operation):
+                fake = FakeGitLab()
+                with self.assertRaisesRegex(ValueError, "startDate"):
+                    if operation == "create":
+                        fake.create({"subject": "s", "startDate": "2026-09-01"}, _ctx())
+                    else:
+                        fake.update_status("7", "CLOSED", None, _ctx(),
+                                           planning={"startDate": "2026-09-01"})
+                self.assertFalse(any(call[0] in ("POST", "PUT") for call in fake.calls))
+
     def test_get_accepts_hash_prefix_and_rejects_nonnumeric(self):
         self.assertEqual(FakeGitLab().get("#7", _ctx())["id"], "7")
         with self.assertRaises(ValueError):

@@ -736,6 +736,114 @@ class RerunTests(unittest.TestCase):
         self.assertTrue(self._fake(trigger=None).has_project("proj-a"))
 
 
+class StopTests(unittest.TestCase):
+    """A queue id is global, so a permitted job alone cannot authorize cancellation."""
+
+    def _fake(self, reply=b'{"task":{"name":"build-job","url":"job/build-job/"}}', trigger=True):
+        return FakeJenkins(jobs={"proj-a": ["build-job", "read-only"]},
+                           trigger_jobs={"proj-a": ["build-job"]} if trigger else None,
+                           replies={"/queue/item/": reply})
+
+    def test_stop_posts_to_the_explicit_build_with_shared_credentials(self):
+        fake = self._fake()
+        out = fake.stop("build-job", _ctx(), build=12)
+        self.assertEqual(out, {"job": "build-job", "cancelled": "build", "build": 12})
+        self.assertEqual(fake.posts, ["/job/build-job/12/stop"])
+
+    def test_queue_cancellation_verifies_the_job_before_posting(self):
+        fake = self._fake()
+        out = fake.stop("build-job", _ctx(), queue_item=7)
+        self.assertEqual(out, {"job": "build-job", "cancelled": "queueItem", "queueItem": 7})
+        self.assertEqual(fake.paths, ["/queue/item/7/api/json?tree=task[name,url]"])
+        self.assertEqual(fake.posts, ["/queue/cancelItem?id=7"])
+
+    def test_foreign_missing_and_unreadable_queue_owners_never_cancel(self):
+        for reply in (b'{"task":{"name":"foreign-job","url":"job/foreign-job/"}}', b'{}', b'{"task":[]}',
+                      # same leaf name, different job: a folder / multibranch item
+                      b'{"task":{"name":"build-job","url":"job/team/job/build-job/"}}',
+                      b'{"task":{"name":"build-job"}}',                       # no URL: cannot qualify it
+                      CiBackendError("unavailable", status=503)):
+            with self.subTest(reply=reply):
+                fake = self._fake(reply)
+                with self.assertRaises(CiBackendError):
+                    fake.stop("build-job", _ctx(), queue_item=7)
+                self.assertEqual(fake.posts, [])
+
+    def test_stop_requires_exactly_one_positive_integer_target(self):
+        for target in ({}, {"queue_item": 7, "build": 12},
+                       *({field: value} for field in ("queue_item", "build")
+                         for value in (True, 0, -1, "12", "lastBuild", 1.5))):
+            with self.subTest(target=target):
+                fake = self._fake()
+                with self.assertRaises(CiBackendError):
+                    fake.stop("build-job", _ctx(), **target)
+                self.assertEqual(fake.posts, [])
+                self.assertEqual(fake.paths, [])
+
+    def test_stop_enforces_the_trigger_allowlist_before_any_request(self):
+        for fake, job, context in ((self._fake(), "read-only", _ctx()),
+                                   (self._fake(), "build-job", _ctx(project="proj-b")),
+                                   (self._fake(trigger=False), "build-job", _ctx())):
+            with self.assertRaises(CiBackendError):
+                fake.stop(job, context, build=12)
+            self.assertEqual((fake.posts, fake.paths), ([], []))
+
+    def test_gateway_stop_is_role_gated_confirmed_bound_and_audited(self):
+        fake, audit = self._fake(), _ListAudit()
+        app = GatewayApp(memory_backend=_NullMemory(), audit_sink=audit, ci_backend=fake)
+        runner = Principal(actor="runner", project="proj-a", roles=("ci_runner",), token_id="r")
+        reader = Principal(actor="reader", project="proj-a", roles=(), token_id="v")
+
+        def call(args, principal=runner):
+            return app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                   "params": {"name": "ci.stop", "arguments": args}}, principal)
+
+        self.assertEqual(call({"job": "build-job", "build": 12}, reader)["error"]["code"], -32003)
+        for args in ({"job": "read-only", "build": 12}, {"job": "build-job"},
+                     {"job": "build-job", "build": True}):
+            self.assertNotIn("confirmationId", str(call(args)))
+        pending = call({"job": "build-job", "build": 12})["result"]["structuredContent"]
+        self.assertTrue(pending["confirmationRequired"])
+        self.assertEqual(fake.posts, [])
+        changed = call({"job": "build-job", "build": 13, "confirm": pending["confirmationId"]})
+        self.assertTrue(changed["result"]["structuredContent"]["confirmationRequired"])
+        self.assertEqual(fake.posts, [])
+        pending = call({"job": "build-job", "build": 12})["result"]["structuredContent"]
+        out = call({"job": "build-job", "build": 12, "confirm": pending["confirmationId"]})
+        self.assertEqual(out["result"]["structuredContent"]["build"], 12)
+        self.assertEqual(fake.posts, ["/job/build-job/12/stop"])
+        self.assertEqual((audit.events[-1].tool, audit.events[-1].outcome), ("ci.stop", "ok"))
+        self.assertEqual(str(audit.events[-1].resource_id), "build-job:12")
+
+    def test_gateway_queue_confirmation_binds_and_rechecks_the_queue_item(self):
+        fake = self._fake()
+        app = GatewayApp(memory_backend=_NullMemory(), audit_sink=_ListAudit(), ci_backend=fake)
+        runner = Principal(actor="runner", project="proj-a", roles=("ci_runner",), token_id="r")
+
+        def call(args):
+            return app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                   "params": {"name": "ci.stop", "arguments": args}}, runner)
+
+        args = {"job": "build-job", "queueItem": 7}
+        pending = call(args)["result"]["structuredContent"]
+        self.assertEqual(fake.posts, [])
+        changed = call({**args, "queueItem": 8, "confirm": pending["confirmationId"]})
+        self.assertTrue(changed["result"]["structuredContent"]["confirmationRequired"])
+        pending = call(args)["result"]["structuredContent"]
+        fake.replies["/queue/item/"] = b'{"task":{"name":"foreign-job"}}'
+        self.assertTrue(call({**args, "confirm": pending["confirmationId"]})["result"]["isError"])
+        self.assertEqual(fake.posts, [])
+
+    def test_stop_visibility_matches_rerun(self):
+        for trigger, roles in ((True, ("ci_runner",)), (False, ("ci_runner",)), (True, ())):
+            app = GatewayApp(memory_backend=_NullMemory(), audit_sink=_ListAudit(),
+                             ci_backend=self._fake(trigger=trigger))
+            principal = Principal(actor="actor", project="proj-a", roles=roles, token_id="t")
+            listed = app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, principal)
+            names = {tool["name"] for tool in listed["result"]["tools"]}
+            self.assertEqual("ci.stop" in names, trigger and bool(roles))
+
+
 class GatewayCiTests(unittest.TestCase):
     def setUp(self):
         self.audit = _ListAudit()

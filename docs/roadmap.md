@@ -8,7 +8,7 @@ reflects dependency rather than a schedule.
 
 The write path landed in 0.2.0 for GitHub (ADR-0017): proposals are pull
 requests opened under the caller's own credential, and nothing here can merge
-one. Three pieces of the original design are still out:
+one. These pieces of the original design are still out:
 
 - **GitLab**, and after that anything else. The interface is host-neutral; only
   the GitHub implementation exists. Narrower than it looks: `gitlab_backend.py`
@@ -20,12 +20,12 @@ one. Three pieces of the original design are still out:
   `last_commit_id` answers 400 or 409. Measure it against a throwaway project
   the way the GitHub statuses were measured; do not take it from documentation
   nobody fetched.
-- **Images.** Upstream stages them through a presigned single-use upload so the
-  bytes never pass through the agent's context. Inlining base64 in a tool
-  argument would undo exactly that, so it waits for the endpoint rather than
-  arriving in a worse shape.
-- **`docs.review_list`.** The interface has no list operation yet; `review_get`
-  answers about a proposal you already know the number of.
+- **Images.** 0.3.0 adds staged UTF-8 Markdown bodies through a dedicated
+  authenticated PUT route. Binary images and asset publication still need their
+  own validation and proposal mechanism; `kind` currently accepts only `content`.
+- ~~**`docs.review_list`.**~~ Shipped in 0.3.0. The interface now lists open
+  proposals as well as reading a known proposal; it also requests reviewers and
+  closes the caller's own proposal, without merge, approve or push operations.
 
 Template seeding is not on this list any more: templates are read from
 `.mcpgw/templates/` in the corpus itself, which makes the opinion about document
@@ -33,12 +33,11 @@ structure the deployment's rather than this project's.
 
 ## Corpus linting
 
-A corpus health check — broken links, naming conventions, documents left on an
-older template version, correction callouts that were never dated — is
-implemented upstream of this release but declines to generalize: every rule
-encodes one team's document conventions, and one of them matches Chinese-language
-callout markers. It would need to become configurable before it belongs in a
-project other people deploy.
+~~A corpus health check.~~ Shipped in 0.3.0 as read-only `docs.lint`, including
+missing titles, broken relative Markdown links and duplicate slugs. It works
+without a review host and reports findings rather than a publication verdict.
+Deployment-specific naming conventions, template-version checks and correction
+callouts remain outside the built-in rules.
 
 ## Memory: semantic retrieval
 
@@ -82,7 +81,8 @@ preferentially the important ones.
 
 ## CI: parameterised triggers
 
-`ci.builds` and `ci.rerun` both shipped in 0.2.0. `ci.rerun` re-runs a job as
+`ci.builds` and `ci.rerun` both shipped in 0.2.0, and `ci.stop` (cancel a queued
+item or stop a build, same gate) in 0.3.0. `ci.rerun` re-runs a job as
 configured, behind a trigger allowlist separate from the read one, the
 `ci_runner` role and the confirmation gate.
 

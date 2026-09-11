@@ -2272,6 +2272,41 @@ class IssueWriteFieldTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.backend.create({"subject": "s", "dueDate": bad}, self._ctx())
 
+    def test_start_date_is_forwarded_on_both_writes(self) -> None:
+        self.backend.create({"subject": "s", "startDate": "2026-09-01"}, self._ctx())
+        self.assertEqual(self.writes[-1]["start_date"], "2026-09-01")
+        self.backend.update_status("12", "RESOLVED", 100, self._ctx(),
+                                   planning={"startDate": "2026-09-02"})
+        self.assertEqual(self.writes[-1]["start_date"], "2026-09-02")
+
+    def test_planning_dates_report_the_invalid_field_without_writing(self) -> None:
+        for field in ("startDate", "dueDate"):
+            for bad in ("2026-9-01", "2026-02-31"):
+                for operation in ("create", "update_status"):
+                    with self.subTest(field=field, bad=bad, operation=operation):
+                        with self.assertRaisesRegex(ValueError, field):
+                            if operation == "create":
+                                self.backend.create({"subject": "s", field: bad}, self._ctx())
+                            else:
+                                self.backend.update_status("12", "RESOLVED", 100, self._ctx(),
+                                                           planning={field: bad})
+                        self.assertEqual(self.writes, [])
+
+    def test_read_shape_includes_nullable_planning_fields(self) -> None:
+        from mcp_governance_gateway.issue_backend import _normalize_issue
+
+        for priority, expected in (({"name": "HIGH"}, "high"), (None, None),
+                                   ({"name": 42}, None)):
+            with self.subTest(priority=priority):
+                row = _normalize_issue({"priority": priority, "due_date": "2026-09-01", "start_date": "2026-08-20"})
+                self.assertEqual(row["priority"], expected)
+                self.assertEqual(row["dueDate"], "2026-09-01")
+                self.assertEqual(row["startDate"], "2026-08-20")
+        self.assertIsNone(_normalize_issue({})["startDate"])
+        row = self.backend.get("12", self._ctx())
+        self.assertIsNone(row["priority"])
+        self.assertIsNone(row["dueDate"])
+
     def test_parent_issue_is_resolved_inside_this_project_only(self) -> None:
         self.backend.create({"subject": "s", "parentIssue": "900"}, self._ctx())
         self.assertEqual(self.writes[-1]["parent_issue_id"], 900)

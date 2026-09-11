@@ -1,35 +1,80 @@
 # MCP Governance Gateway
 
-A governance and multi-tenancy layer that sits between AI coding agents and the
-backends they use — team memory, an issue tracker, a documentation corpus, and
-CI — and exposes them over the [Model Context Protocol](https://modelcontextprotocol.io).
+**One MCP endpoint that lets a team hand its memory, issue tracker, docs corpus and CI to
+autonomous coding agents — with the tenant, the confirmation and the audit enforced
+server-side, not trusted from the client.**
 
-Agents get a small, uniform set of MCP tools. The gateway makes those tools
-**safe to hand to an autonomous agent** in a team setting:
+[![CI](https://github.com/aarontzeng/mcp-governance-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/aarontzeng/mcp-governance-gateway/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/aarontzeng/mcp-governance-gateway)](https://github.com/aarontzeng/mcp-governance-gateway/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
-- **Per-tenant isolation.** Each token is bound server-side to one project. The
-  tenant is never a tool argument, so an agent cannot read or write another
-  team's memory or issues — the boundary is enforced by the gateway, not
-  trusted from the client.
-- **Confirmation-gated writes.** Tools that mutate an external system of record
-  (issue create, note, status change) use a two-step prepare/commit flow. The
-  first call returns a single-use, short-lived confirmation id bound to the
-  exact arguments; nothing is written until a second call confirms it. Memory
-  writes are not confirmed — they stay inside the caller's own project and are
-  secret-scanned and rate-limited per user and per project instead.
-- **Per-user attribution and an audit trail.** Every call is logged with the
-  acting identity; writes to a backend are stamped with who asked, so a shared
-  service credential never erases individual accountability.
-- **Least privilege, where roles exist.** Issue writes require an explicit
-  `issue_writer` role (default-deny) and destructive operations are denied
-  outright. Be aware of the boundary: memory writes are gated by tenancy and
-  quota, not by a role, so a token with a project can append to that project's
-  shared memory — [the security model states exactly which tools check
-  what](docs/security-model.md#authorization-as-implemented).
+```mermaid
+flowchart LR
+    A["AI coding agents<br/>Claude Code · Codex · Cursor · any MCP client"]
+    A -- "MCP over HTTP<br/>one bearer token" --> G
+    subgraph G["MCP Governance Gateway"]
+        direction TB
+        T["token → project<br/>the tenant is never a tool argument"]
+        C["confirm-gated writes<br/>prepare → single-use id → commit"]
+        R["roles, default-deny<br/>issue_writer · docs_writer · docs_reviewer · ci_runner"]
+        U["per-user attribution<br/>every call audited, every write stamped"]
+    end
+    G --> M[("team memory<br/>agentmemory")]
+    G --> I[("issues<br/>Redmine or GitLab")]
+    G --> D[("docs corpus<br/>git repos + pull requests")]
+    G --> J[("CI<br/>Jenkins")]
+```
 
-The gateway is a single Python process (standard-library HTTP server, one third-
-party dependency for encryption). Backends are pluggable and enabled by
-configuration — run only the ones you need.
+A governance and multi-tenancy layer between AI coding agents and the backends a team
+already runs. Agents get a small, uniform set of MCP tools; the gateway decides, on the
+server, which project a token may touch, which writes need a second call to confirm, which
+roles a token holds, and who is on record for every action.
+
+## What it stops
+
+- **An agent reading another team's memory or issues.** The project comes from the token,
+  server-side; there is no argument an agent could set to reach a different tenant.
+- **An issue, a proposal or a build created because the model was confident.** Writes to a
+  system of record return a single-use confirmation id bound to the exact arguments; nothing
+  is written until a second call carries it back.
+- **A shared service credential erasing who acted.** Every call, read or write, is audited
+  under the acting identity; issue notes are stamped with it, and docs proposals are opened
+  under the person's own enrolled credential. (CI triggers go out under the deployment's
+  Jenkins account — the audit line is where the person is.)
+
+## What an agent sees
+
+The two-step write, as the gateway actually answers it (from the test suite):
+
+```jsonc
+// 1. the agent asks to create an issue
+tools/call  issues.create  {"subject": "Boot loop on rev C boards"}
+
+// → nothing is written; the gateway returns a confirmation bound to these arguments
+{
+  "confirmationRequired": true,
+  "confirmationId": "…single-use, short-lived…",
+  "action": "issues.create",
+  "arguments": {"subject": "Boot loop on rev C boards"},
+  "summary": "Create issue: 'Boot loop on rev C boards'",
+  "instructions": "Re-call this tool with the arguments you sent — UNABRIDGED … plus \"confirm\": \"<confirmationId>\" to proceed."
+}
+
+// 2. the agent re-sends the same arguments plus the id
+tools/call  issues.create  {"subject": "Boot loop on rev C boards", "confirm": "…"}
+
+// → now it is written, under the caller's identity, and audited as such
+{"created": true, "id": "4711", …}
+```
+
+A wrong or reused id, or changed arguments, gets a fresh confirmation instead of a write
+(ADR-0003). Memory writes are not confirmed — they stay inside the caller's own project and
+are secret-scanned and rate-limited instead.
+
+The gateway is a single Python process (standard-library HTTP server, one third-party
+dependency for encryption). Backends are pluggable and enabled by configuration — run only
+the ones you need.
 
 ## Backends
 
@@ -37,8 +82,8 @@ configuration — run only the ones you need.
 |---|---|---|
 | Team memory | `memory.search` / `save` / `list`, `memory.lesson_*`, `memory.action_*` | [agentmemory](https://github.com/rohitg00/agentmemory) (Apache-2.0) |
 | Issue tracker | `issues.get` / `search` / `mine` / `categories` / `create` / `add_note` / `update_status` | Redmine **or** GitLab (per deployment) |
-| Docs corpus | `docs.search` / `get` / `list`, and — where a review host is configured — `docs.create` / `update` / `review_comment` / `review_get` | per-project Git repositories, indexed with a built-in BM25 (CJK-aware); proposals open pull requests on GitHub |
-| CI | `ci.status` / `ci.builds` / `ci.log` / `ci.artifact`, plus `ci.rerun` | Jenkins (reads, and a gated build trigger) |
+| Docs corpus | `docs.search` / `get` / `list` / `lint`, and — where a review host is configured — `docs.create` / `update` (inline or staged via `docs.asset_stage_url`) / `review_get` / `review_list` / `review_comment` / `review_add_reviewer` / `review_abandon` (own proposal only) | per-project Git repositories, indexed with a built-in BM25 (CJK-aware); proposals open pull requests on GitHub |
+| CI | `ci.status` / `ci.builds` / `ci.log` / `ci.artifact`, plus `ci.rerun` / `ci.stop` | Jenkins (reads, and a gated trigger/stop) |
 
 Each backend enforces the same tenancy discipline: operations are scoped to the
 token's project, results are re-filtered wherever the backend returns the tenant

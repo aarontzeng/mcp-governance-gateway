@@ -47,14 +47,15 @@ _DUE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MAX_RESPONSE_BYTES = 2_000_000
 
 
-def _due_date(value: Any) -> str:
+def _iso_date(value: Any, field: str) -> str:
+    """Name the invalid planning field so callers can correct the right date."""
     text = str(value)
     if not _DUE_DATE_RE.match(text):
-        raise ValueError(f"dueDate must be YYYY-MM-DD, got '{text}'")
+        raise ValueError(f"{field} must be YYYY-MM-DD, got '{text}'")
     try:
         date.fromisoformat(text)  # rejects 2026-02-31 and friends, which the regex accepts
     except ValueError as exc:
-        raise ValueError(f"dueDate is not a real date: '{text}'") from exc
+        raise ValueError(f"{field} is not a real date: '{text}'") from exc
     return text
 
 
@@ -583,8 +584,10 @@ class RedmineHttpBackend(IssueBackend):
         tenant boundary and turns the field into an existence oracle for ids the
         caller may not read.
         """
+        if fields.get("startDate") is not None:
+            issue_body["start_date"] = _iso_date(fields["startDate"], "startDate")
         if fields.get("dueDate") is not None:
-            issue_body["due_date"] = _due_date(fields["dueDate"])
+            issue_body["due_date"] = _iso_date(fields["dueDate"], "dueDate")
         if fields.get("priority") is not None:
             issue_body["priority_id"] = self._enum_id("priority", fields["priority"])
         if fields.get("parentIssue") is not None:
@@ -683,6 +686,7 @@ def _issue_path(value: Any) -> str:
 
 def _normalize_issue(issue: dict[str, Any]) -> dict[str, Any]:
     project = _d(issue.get("project"))
+    priority = _d(issue.get("priority")).get("name")
     assigned = _d(issue.get("assigned_to"))
     assignee = None
     if assigned.get("id") is not None:
@@ -697,5 +701,8 @@ def _normalize_issue(issue: dict[str, Any]) -> dict[str, Any]:
         "category": _d(issue.get("category")).get("name"),
         "assignee": assignee,
         "doneRatio": issue.get("done_ratio"),
+        "priority": (priority.lower() or None) if isinstance(priority, str) else None,
+        "startDate": issue.get("start_date") or None,
+        "dueDate": issue.get("due_date") or None,
         "updatedAt": issue.get("updated_on"),
     }

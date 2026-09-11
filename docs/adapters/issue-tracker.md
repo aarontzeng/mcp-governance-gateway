@@ -24,6 +24,8 @@ tracking backend such as Redmine.
   "subject": "Issue title",
   "status": "IN_PROGRESS",
   "tracker": "BUG",
+  "priority": "high",
+  "dueDate": "2026-09-30",
   "assignee": {
     "id": "user-id",
     "displayName": "User"
@@ -102,7 +104,7 @@ gateway host being able to reach Redmine.
   rejected with the list this instance actually offers.
 - **Write fields.** Beyond subject/description/status, `issues.create` and
   `issues.update_status` accept `assignee` and the optional planning fields
-  `dueDate` / `priority` / `parentIssue` / `category` (Redmine only — the GitLab
+  `startDate` / `dueDate` / `priority` / `parentIssue` / `category` (Redmine only — the GitLab
   backend refuses them by name rather than dropping them silently). All of them are
   part of the confirmation binding, so a field cannot be swapped between the
   prepare and commit calls. `tracker` and `priority` are resolved by name from the
@@ -111,6 +113,11 @@ gateway host being able to reach Redmine.
   is resolved through the project-scoped read first: Redmine would otherwise parent
   an issue onto another project's, which both crosses the tenant boundary and turns
   the field into an existence oracle.
+  Both dates must be real calendar dates in `YYYY-MM-DD` form; validation errors
+  identify the invalid field. Read rows, including `issues.mine` and `issues.get`,
+  include `priority` as a lower-case name or null and `dueDate` as a date or null.
+  GitLab returns null priority and passes through its due date on reads, while
+  refusing every planning input (`startDate`, `dueDate`, `priority`, `parentIssue`, `category`) on writes.
 - **`issues.mine` never answers from the shared credential.** `assigned_to_id=me`
   on the shared service key resolves to the service account, so the tool would
   return *its* issues as the caller's. It therefore requires the caller's own

@@ -19,6 +19,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -27,6 +28,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from .memory_backend import ActorLabels, RequestContext, _display_actor
 from .review_backend import ReviewSpec, parse_review_spec
@@ -36,6 +38,7 @@ _PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")  # no leading dot:
 _CJK_RE = re.compile("[\\u3400-\\u9fff]")
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.M)
+_LINK_RE = re.compile(r"\[[^\]\n]*\]\(\s*<?([^\s)>]+)>?(?:\s+[^)]*)?\)")
 
 
 class DocsBackendError(Exception):
@@ -341,6 +344,41 @@ class DocsCorpus:
             items.append(item)
         return {"documents": items, "commit": snap.head, "count": len(items)}
 
+    def lint(self, context: RequestContext) -> dict[str, Any]:
+        """Report corpus findings from the served snapshot, never a publish verdict.
+
+        A filename fallback keeps reads useful but is not an authored title.
+        Slugs default to the full served path, so independent index pages do
+        not collide simply because they share a basename.
+        """
+        snap = self._snapshot_for(context)
+        findings: list[dict[str, Any]] = []
+        slugs: dict[str, list[str]] = {}
+        for rel, doc in sorted(snap.docs.items()):
+            title = doc.meta.get("title")
+            if not (isinstance(title, str) and title.strip()) and not _first_heading(doc.text):
+                findings.append({"kind": "missing_title", "path": rel})
+            declared = doc.meta.get("slug")
+            slug = declared.strip() if isinstance(declared, str) and declared.strip() else rel[:-3]
+            slugs.setdefault(slug.casefold(), []).append(rel)
+            for target in _LINK_RE.findall(doc.text):
+                try:
+                    parsed = urlsplit(target)
+                except ValueError:
+                    continue
+                if parsed.scheme or parsed.netloc or parsed.path.startswith("/"):
+                    continue
+                path = unquote(parsed.path)
+                if not path.endswith(".md"):
+                    continue
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(rel), path))
+                if resolved not in snap.docs:
+                    findings.append({"kind": "broken_link", "path": rel, "target": target})
+        for slug, paths in sorted(slugs.items()):
+            if len(paths) > 1:
+                findings.append({"kind": "duplicate_slug", "slug": slug, "paths": paths})
+        return {"findings": findings, "commit": snap.head, "count": len(findings)}
+
     def get(self, path: str, context: RequestContext) -> dict[str, Any]:
         snap = self._snapshot_for(context)
         # Answer purely from the index: unserved-but-present and never-existed paths
@@ -608,6 +646,7 @@ def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
     if not isinstance(data, dict):
         raise ValueError("docs repos file must be a JSON object of project -> {url, branch}")
     repos: dict[str, dict[str, str]] = {}
+    urls: set[str] = set()
     for project, spec in data.items():
         # JSON has no comments, and a config file an operator reads deserves
         # prose in it. Exactly this one key, not every `_`-prefixed one: a
@@ -623,6 +662,10 @@ def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
         if not isinstance(spec, dict) or not spec.get("url"):
             raise ValueError(f"docs repo entry for {project!r} needs a url")
         entry = {"url": str(spec["url"]), "branch": str(spec.get("branch", "master"))}
+        url_key = entry["url"].casefold()
+        if url_key in urls:
+            raise ValueError("two projects cannot map the same docs repo URL")
+        urls.add(url_key)
         # Validated at load time so a malformed `review` block is a boot error
         # rather than a surprise at the first write: an operator who wrote one
         # believes the write path is on.

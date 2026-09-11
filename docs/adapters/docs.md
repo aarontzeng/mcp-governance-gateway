@@ -1,7 +1,7 @@
 # Docs Corpus Adapter
 
-Read-only `docs.search` / `docs.get` over **one docs repo per project**
-(ADR-0011). Tenancy = repo = the token's `project` claim; no extra role.
+Reads and reviewed proposals over **one docs repo per project**
+(ADR-0011). Tenancy = repo = the token's `project` claim; reads need no extra role.
 
 ## Backend contract
 
@@ -13,7 +13,8 @@ The backend is a git repo, not an HTTP service:
   whose project has an entry. The repos file is re-read when it changes
   (mtime/size/inode), so adding or retargeting a project needs no restart; a
   corrupt or partial write keeps the last-good map rather than taking every
-  project's docs tools down.
+  project's docs tools down. Repository URLs must be unique across projects
+  (case-insensitive); duplicate mappings are rejected to preserve corpus isolation.
 - The gateway keeps a clone per project, refreshed at most once per interval on
   access.
 - **A snapshot belongs to a specification, not just to a moment.** Each snapshot
@@ -43,9 +44,18 @@ The backend is a git repo, not an HTTP service:
 |---|---|---|
 | `docs.search` | `query` (≤512 chars), `limit` (1–25, default 8) | `results[] {path,title,snippet,updated,commit,score}`, `commit`, `count` |
 | `docs.get` | `path` (as returned by search) | `path,title,frontmatter,text,commit`, plus `createdBy`/`updatedBy` when the log has them |
+| `docs.lint` | — | `findings[]`, `commit`, `count`; available on read-only corpora |
 | `docs.list` | — | `documents[] {path,title,updated}` plus `status`/`staleAfter`/`decisionStatus` where declared, `commit`, `count` |
 
 `commit` is the corpus snapshot sha — cite it when quoting a document.
+
+`docs.lint` reports missing titles (neither nonempty frontmatter title nor a
+heading), broken relative `.md` links into the served snapshot, and duplicate
+case-insensitive slugs (explicit `slug`, otherwise the full path without `.md`).
+Findings use `kind`: `missing_title` with `path`, `broken_link` with `path` and
+`target`, or `duplicate_slug` with `slug` and `paths`. External and absolute links
+are skipped. This is read-only advice, not a publication verdict or a check of
+remote URLs, template versions, or deployment-specific naming conventions.
 
 **Lifecycle signals on `docs.list`.** A document may declare `status`,
 `stale_after` and `decision_status` in its frontmatter; the listing passes them
@@ -92,18 +102,78 @@ are on.
 
 | Tool | Arguments | Does |
 |---|---|---|
-| `docs.create` | `path`, `content`, `message`, `confirm` | Opens a pull request adding a new document. Refuses a path that already exists |
-| `docs.update` | `path`, `content`, `message`, `sha`, `confirm` | Opens a pull request revising one. `sha` is what `docs.get` returned; a document that moved is a **409**, not an overwrite |
+| `docs.create` | `path`, `content` or `contentStaged`, `message`, `confirm` | Opens a pull request adding a new document. Refuses a path that already exists |
+| `docs.update` | `path`, `content` or `contentStaged`, `message`, `sha`, `confirm` | Opens a pull request revising one. `sha` is what `docs.get` returned; a document that moved is a **409**, not an overwrite |
 | `docs.review_comment` | `change`, `body`, `confirm` | A plain comment on a proposal, stamped with the gateway footer |
 | `docs.review_get` | `change` | One proposal's state, title, url and whether it is merged |
+| `docs.review_list` | `limit` (1–50, default 20) | Open proposals, newest updated first: `changes[] {number,title,author,updated,url,isAuthor}`, `count` |
+| `docs.review_add_reviewer` | `change`, `reviewer`, `confirm` | Requests a GitHub account's review on an open proposal; returns `number`, `reviewer`, `reviewerAdded` |
+| `docs.review_abandon` | `change`, optional `message`, `confirm` | Closes your own open proposal; returns `number`, `url`, `abandoned`; leaves its branch intact |
+| `docs.asset_stage_url` | optional `kind` (`content` only, default `content`) | Mints an upload URL and `stagedId`; see the staging flow below |
 
-All three writes are confirmation-gated and secret-scanned, need the
-`docs_writer` (or `docs_reviewer`) role, and go out under the **caller's own
-credential** for that host — enrolled in the credential store as backend
+Create, update and abandon require `docs_writer`; commenting and requesting a
+reviewer require `docs_reviewer`. All five host writes are confirmation-gated;
+document text, commit messages and comment bodies are secret-scanned. Prepare
+without `confirm`, then repeat the same arguments with the returned confirmation
+id in `confirm`. Requesting a reviewer changes the host's requested-reviewer
+list, so its confirmation binds both `change` and `reviewer`. It is idempotent:
+a reviewer already requested (case-insensitive account comparison) causes no
+second host write. `reviewer` is a GitHub login of at most 39 characters.
+
+Review listing and reading need no writer/reviewer role or confirmation.
+`isAuthor` compares against the caller's enrolled host identity. Abandonment also
+checks that identity against the proposal's author; another person's proposal
+cannot be closed. An optional abandonment message is secret-scanned and stamped
+as a comment before closure.
+
+Review-host operations go out under the **caller's own credential** for that
+host — enrolled in the credential store as backend
 `docs-github`. There is no shared account and no fallback: a caller who has not
 enrolled gets a 428 saying so. A proposal may only name a document the read path
 would serve (under a served directory, ending in `.md`), so these tools cannot
 propose a workflow file or a source file.
+
+### Staged Markdown (`docs.asset_stage_url` → PUT → `contentStaged` → confirm)
+
+Set `DOCS_ASSET_BASE_URL` to the public gateway base URL and route
+`PUT /docs/asset-stage/<upload-token>` to the MCP listener. Staging is advertised
+only for a configured review corpus and needs `docs_writer`. Minting and uploading
+do not write to the review host and require no confirmation. Only UTF-8 Markdown
+content is supported; this is not an image or general binary upload facility.
+
+1. Call `docs.asset_stage_url` with `{"kind":"content"}`. It returns `url`, a
+   `doc_`-prefixed `stagedId`, `expiresInSec: 60`, `singleUse: true`,
+   `maxBytes: 2097152`, `kind: "content"`, and
+   `allowedTypes: ["text/markdown; charset=utf-8"]`.
+2. PUT the nonempty UTF-8 bytes to `url` within **60 seconds**, with the same
+   gateway bearer token and a single `Content-Length` (no `Transfer-Encoding`).
+   The maximum body is **2 MiB**, inclusive. The route uses the same signed
+   identity propagation as `/mcp`; a front gateway must forward the same identity
+   on both routes. Success is HTTP 201 with `stagedId`, `bytes`, and `type`.
+3. Prepare `docs.create` or `docs.update`, passing `contentStaged: stagedId`
+   instead of `content`, plus the usual path/message and, for update, `sha`.
+   Passing both body forms is an error. Prepare checks ownership, expiry and
+   uploaded content before issuing a confirmation id, and secret-scans the body.
+4. Repeat those arguments with `confirm` set to that id. The immutable stage id
+   binds the body without resending it. A successful host proposal consumes the
+   stage; a failed proposal releases it for a fresh prepare/confirm attempt.
+
+Ownership is the same `(actor, project, token_id)` key as confirmation. Only the
+minting token can upload or use the stage: another bearer for the same actor and
+project is refused, even though the PUT route has no separate role check. Foreign,
+expired and consumed stages all return the same 404. A foreign bearer's attempt
+does **not** consume the URL. The owner's first upload accepted for stage
+validation consumes the URL even if body validation fails; transport refusals
+before stage validation do not consume it.
+
+An uploaded stage lasts **3600 seconds from upload**, independently of the URL's
+60-second lifetime. Each actor may hold **16 pending or uploaded stages** and
+**32 MiB of uploaded bytes**, shared across that actor's projects; exact-fit byte
+usage is accepted. Exceeding a quota returns 429. Preparation does not consume a
+stage; confirmation reserves it through the host call, so a competing claim
+returns 409. There is no stage-delete tool: expiration and quotas bound retained
+state. Stages and upload tokens live only in process memory and disappear on
+restart.
 
 ### What actually carries the governance property
 

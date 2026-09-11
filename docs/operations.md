@@ -174,6 +174,40 @@ Host-side monitoring should alert on:
 - backend container health not `healthy`
 - the memory backend's liveness endpoint failing
 
+## Token Store Archive and the Deploy Invariant
+
+Two scripts under `scripts/` protect the tokens a deployment has issued. Both
+are plain bash-over-python3, take their paths from arguments or environment,
+and refuse rather than guess.
+
+**`scripts/mcpgw-token-backup.sh [<tokens-file>] [<archive-dir>]`** — a daily
+archive of the user-token store, separate from whatever the minter writes,
+so a store damaged by repeated writes during an incident can be restored from
+a copy the minter never touched. Defaults: `GATEWAY_USER_TOKEN_FILE` and
+`TOKEN_BACKUP_DIR`. Each run writes one gzip'd, timestamped copy (mode 0600),
+verifies it reads back, and keeps the newest `KEEP` (default 30) **readable**
+archives — an unreadable file never takes a slot and is never deleted, only
+named on stderr, so a corrupt archive cannot push the last good one out. It refuses
+to archive a store that **shrank** by more than `SHRINK_PCT` (default 25) of
+the previous archive's rows — a shrinking token store is the signature of the
+failure this exists for, and archiving it would overwrite the evidence; set
+`SHRINK_PCT=100` only after you have looked. A future-dated archive stops it
+too (check the clock). Concurrent runs skip on a lock instead of racing. Run it
+from cron once a day; it exits non-zero on any refusal so the cron mail says so.
+
+**`scripts/check-tokens-intact.sh {snapshot|verify} <snapshot-file>`** — the
+check that "a deploy must not invalidate an issued token". Before a deploy,
+`snapshot` records a fingerprint of every token in `GATEWAY_TOKEN_FILE` and
+`GATEWAY_USER_TOKEN_FILE` (the snapshot file is created 0600 and never
+overwritten). After the deploy, `verify` re-reads the stores, fails if any
+token disappeared or changed, and then — with `GATEWAY_URL` set — makes one
+authenticated request with a pre-existing token **of each kind** (static and
+user) to prove the live gateway still accepts them: store continuity alone
+cannot see a deploy that changed authentication, and a static token that
+still works says nothing about user tokens. Without `GATEWAY_URL` the live
+half is skipped and says so on stderr. Either failure exits non-zero; put both
+calls in the deploy procedure, not in someone's memory.
+
 ## Backend Isolation Checklist
 
 For each backend, verify:

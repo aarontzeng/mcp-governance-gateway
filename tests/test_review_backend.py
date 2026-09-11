@@ -380,6 +380,63 @@ class GitHubReviewBackendTests(unittest.TestCase):
         )
         self.assertEqual(backend.recorded[0][:2], ("GET", f"/repos/{self.spec.repo}/pulls/42"))
 
+    def test_list_changes_scopes_filters_and_marks_host_author(self) -> None:
+        def row(number, repo, author, updated, state="open"):
+            return {"number": number, "base": {"repo": {"full_name": repo}},
+                    "user": {"login": author}, "updated_at": updated, "state": state,
+                    "title": "Proposal", "html_url": "https://example.com/proposal"}
+        path = f"/repos/{self.spec.repo}/pulls?state=open&sort=updated&direction=desc&per_page=10"
+        backend = FakeGitHub(replies={
+            ("GET", "/user"): {"login": "alice"},
+            ("GET", path): [row(1, self.spec.repo, "alice", "2026-01-01"),
+                            row(2, "other/docs", "alice", "2026-03-01"),
+                            row(3, self.spec.repo, "bob", "2026-02-01"),
+                            row(4, self.spec.repo, "alice", "2026-04-01", "closed")],
+        })
+        result = backend.list_changes(self.spec, 10, "tok", self.ctx)
+        self.assertEqual([r["number"] for r in result["changes"]], [3, 1])
+        self.assertEqual([r["isAuthor"] for r in result["changes"]], [False, True])
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(set(result["changes"][0]), {"number", "title", "author", "updated", "url", "isAuthor"})
+
+    def test_add_reviewer_refuses_foreign_or_closed_and_is_idempotent(self) -> None:
+        path = f"/repos/{self.spec.repo}/pulls/42"
+        for repo, state, status in (("other/docs", "open", 404), (self.spec.repo, "closed", 410)):
+            backend = FakeGitHub(replies={("GET", path): {
+                "base": {"repo": {"full_name": repo}}, "state": state}})
+            with self.assertRaises(ReviewBackendError) as caught:
+                backend.add_reviewer(self.spec, 42, "bob", "tok", self.ctx)
+            self.assertEqual(caught.exception.status, status)
+            self.assertTrue(all(m == "GET" for m, _, _ in backend.recorded))
+        for requested in ([], [{"login": "BOB"}]):
+            backend = FakeGitHub(replies={("GET", path): {
+                "base": {"repo": {"full_name": self.spec.repo}}, "state": "open",
+                "requested_reviewers": requested}})
+            result = backend.add_reviewer(self.spec, 42, "bob", "tok", self.ctx)
+            self.assertTrue(result["reviewerAdded"])
+            writes = [r for r in backend.recorded if r[0] == "POST"]
+            self.assertEqual(len(writes), 0 if requested else 1)
+            if writes:
+                self.assertEqual(writes[0], ("POST", path + "/requested_reviewers", {"reviewers": ["bob"]}))
+
+    def test_close_change_requires_host_author_before_comment_or_close(self) -> None:
+        path = f"/repos/{self.spec.repo}/pulls/42"
+        for author, state, status in (("bob", "open", 403), ("alice", "closed", 410), ("alice", "open", None)):
+            backend = FakeGitHub(replies={
+                ("GET", "/user"): {"login": "alice"},
+                ("GET", path): {"base": {"repo": {"full_name": self.spec.repo}},
+                                 "state": state, "user": {"login": author}, "html_url": "url"},
+            })
+            if status:
+                with self.assertRaises(ReviewBackendError) as caught:
+                    backend.close_change(self.spec, 42, "Withdraw", "tok", self.ctx)
+                self.assertEqual(caught.exception.status, status)
+                self.assertTrue(all(m == "GET" for m, _, _ in backend.recorded))
+            else:
+                self.assertTrue(backend.close_change(self.spec, 42, "Withdraw", "tok", self.ctx)["abandoned"])
+                self.assertEqual(backend.recorded[-1], ("PATCH", path, {"state": "closed"}))
+                self.assertEqual(backend.recorded[-2][2], {"body": "Withdraw"})
+
     def test_path_percent_encoding_escapes_special_characters_per_segment(self) -> None:
         backend = FakeGitHub()
         backend.open_change(self.spec, "wiki/category#1/my file?v=1.md", "c", "m", "tok", self.ctx)

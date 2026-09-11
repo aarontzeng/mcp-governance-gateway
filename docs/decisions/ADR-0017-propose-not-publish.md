@@ -29,10 +29,16 @@ available:
 **A proposal is a pull request, opened under the caller's own credential, and
 the interface has no way to merge one.**
 
-`review_backend.ReviewBackend` has exactly four operations — open a change,
+At acceptance, `review_backend.ReviewBackend` had exactly four operations — open a change,
 revise it, comment on it, read it back. There is no `merge`, no `approve`, no
 `delete_branch`, no `push`. Answer (3): adding one is a code change to a file
 whose docstring says why it must not happen, not a misconfiguration.
+
+**Amendment — 2026-09-11 (0.3.0).** The interface now has seven operations:
+open, revise, comment, read, list open proposals, request a reviewer, and close
+one's own proposal. Request-reviewer and close-own are confirmation-gated host
+writes; requesting review is not approval. There is still no merge, no approve,
+no push, and no branch deletion. The capability boundary above is unchanged.
 
 **And answer (3) alone is not the property.** It makes the GATEWAY unable to
 publish, which is the part this project can own. The property as a whole needs

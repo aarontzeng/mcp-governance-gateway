@@ -1,8 +1,8 @@
 """Propose a document change for review, without being able to publish it.
 
 This is the seam the docs write path hangs on, and the shape of it is the whole
-governance property. There are four operations: open a change, revise it,
-comment on it, read it back. There is no `merge`, no `approve`, no
+governance property. Operations open and revise proposals, comment, inspect and list them,
+request reviewers, and withdraw the caller's own proposal. There is no `merge`, no `approve`, no
 `delete_branch`, no `push` to a protected ref, and no way to add one without
 editing this file.
 
@@ -165,6 +165,18 @@ class ReviewBackend(Protocol):
     def get_change(self, spec: ReviewSpec, change_ref: int,
                    credential: str, context: RequestContext) -> dict[str, Any]:
         """Read one proposal back: state, title, url, and whether it is merged."""
+
+    def list_changes(self, spec: ReviewSpec, limit: int, credential: str,
+                     context: RequestContext) -> dict[str, Any]:
+        """List open proposals in this corpus, newest updated first."""
+
+    def add_reviewer(self, spec: ReviewSpec, change_ref: int, reviewer: str,
+                     credential: str, context: RequestContext) -> dict[str, Any]:
+        """Request review on an open proposal in this corpus, idempotently."""
+
+    def close_change(self, spec: ReviewSpec, change_ref: int, message: str | None,
+                     credential: str, context: RequestContext) -> dict[str, Any]:
+        """Withdraw only the authenticated review-host account's open proposal."""
 
 
 def stamped(body: str, context: RequestContext) -> str:
@@ -442,3 +454,73 @@ class GitHubReviewBackend:
             "branch": branch,
         }
 
+
+    def _caller_login(self, spec: ReviewSpec, credential: str) -> str:
+        # Gateway actors need not be account names on the review host.
+        data = self._request(spec, "GET", "/user", credential)
+        login = data.get("login") if isinstance(data, dict) else None
+        if not isinstance(login, str) or not login:
+            raise ReviewBackendError("review host returned no authenticated account")
+        return login.casefold()
+
+    @staticmethod
+    def _in_repo(data: dict[str, Any], spec: ReviewSpec) -> bool:
+        base = data.get("base")
+        repo = base.get("repo") if isinstance(base, dict) else None
+        name = repo.get("full_name") if isinstance(repo, dict) else None
+        return isinstance(name, str) and name.casefold() == spec.repo.casefold()
+
+    def _open_proposal(self, spec: ReviewSpec, change_ref: int, credential: str) -> dict[str, Any]:
+        _validate_change_ref(change_ref)
+        data = self._request(spec, "GET", f"/repos/{spec.repo}/pulls/{change_ref}", credential)
+        if not isinstance(data, dict) or not self._in_repo(data, spec):
+            raise ReviewBackendError("proposal not found in this project's corpus", status=404)
+        if data.get("state") != "open" or data.get("merged"):
+            raise ReviewBackendError("proposal is already closed", status=410)
+        return data
+
+    def list_changes(self, spec: ReviewSpec, limit: int, credential: str,
+                     context: RequestContext) -> dict[str, Any]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ReviewBackendError("limit must be between 1 and 100", status=400)
+        caller = self._caller_login(spec, credential)
+        data = self._request(spec, "GET", f"/repos/{spec.repo}/pulls?state=open&sort=updated&direction=desc&per_page={limit}", credential)
+        if not isinstance(data, list):
+            raise ReviewBackendError("review host returned invalid proposal list")
+        rows = []
+        for row in data:
+            if not isinstance(row, dict) or not self._in_repo(row, spec) or row.get("state") != "open":
+                continue
+            user = row.get("user") or {}
+            author = user.get("login", "") if isinstance(user, dict) else ""
+            rows.append({"number": row.get("number"), "title": row.get("title", ""),
+                         "author": author, "updated": row.get("updated_at", ""),
+                         "url": row.get("html_url", ""), "isAuthor": author.casefold() == caller})
+        rows.sort(key=lambda row: row["updated"], reverse=True)
+        rows = rows[:limit]
+        return {"changes": rows, "count": len(rows)}
+
+    def add_reviewer(self, spec: ReviewSpec, change_ref: int, reviewer: str,
+                     credential: str, context: RequestContext) -> dict[str, Any]:
+        if not isinstance(reviewer, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", reviewer):
+            raise ReviewBackendError("reviewer must be a GitHub account name", status=400)
+        data = self._open_proposal(spec, change_ref, credential)
+        requested = data.get("requested_reviewers") or []
+        if not any(isinstance(user, dict) and str(user.get("login", "")).casefold() == reviewer.casefold()
+                   for user in requested):
+            self._request(spec, "POST", f"/repos/{spec.repo}/pulls/{change_ref}/requested_reviewers",
+                          credential, body={"reviewers": [reviewer]})
+        return {"number": change_ref, "reviewer": reviewer, "reviewerAdded": True}
+
+    def close_change(self, spec: ReviewSpec, change_ref: int, message: str | None,
+                     credential: str, context: RequestContext) -> dict[str, Any]:
+        data = self._open_proposal(spec, change_ref, credential)
+        caller = self._caller_login(spec, credential)
+        author = data.get("user") or {}
+        if not isinstance(author, dict) or str(author.get("login", "")).casefold() != caller:
+            raise ReviewBackendError("only the proposal's author can abandon it", status=403)
+        if message and message.strip():
+            self.comment(spec, change_ref, message, credential, context)
+        self._request(spec, "PATCH", f"/repos/{spec.repo}/pulls/{change_ref}", credential,
+                      body={"state": "closed"})
+        return {"number": change_ref, "url": data.get("html_url", ""), "abandoned": True}

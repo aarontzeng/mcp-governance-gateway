@@ -169,6 +169,52 @@ class ListingMetadataTests(unittest.TestCase):
         self.assertEqual(self._by_path()["wiki/expiring.md"]["staleAfter"], "2026-10-31")
 
 
+class CorpusLintTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        remote = _make_remote(self._tmp.name, "lint-docs", {
+            "wiki/index.md": '# Index\n[Good](nested/page.md#part) [Missing](missing.md)\n'
+                             '[External](https://example.com/missing.md) [Anchor](#part)\n'
+                             '[Absolute](/missing.md) [Escape](../../outside.md)\n',
+            "wiki/nested/page.md": "---\ntitle: Page\nslug: shared\n---\nBody\n",
+            "raw/reports/other.md": "---\nslug: SHARED\n---\n# Other\n",
+            "wiki/untitled.md": "Body without a title.\n",
+            "README.md": "[Unserved](missing.md)\n",
+        })
+        self.corpus = DocsCorpus(
+            {"p": {"url": remote, "branch": "master"}},
+            str(Path(self._tmp.name) / "clones"), pull_interval_sec=3600,
+        )
+
+    def test_broken_relative_links_are_findings_not_a_verdict(self):
+        out = self.corpus.lint(_ctx("p"))
+        broken = [f for f in out["findings"] if f["kind"] == "broken_link"]
+        self.assertEqual(broken, [
+            {"kind": "broken_link", "path": "wiki/index.md", "target": "missing.md"},
+            {"kind": "broken_link", "path": "wiki/index.md", "target": "../../outside.md"},
+        ])
+        self.assertEqual(set(out), {"findings", "commit", "count"})
+        self.assertEqual(out["count"], len(out["findings"]))
+        self.assertEqual(out["commit"], self.corpus.list(_ctx("p"))["commit"])
+
+    def test_missing_title_ignores_the_filename_fallback(self):
+        missing = [f for f in self.corpus.lint(_ctx("p"))["findings"]
+                   if f["kind"] == "missing_title"]
+        self.assertEqual(missing, [{"kind": "missing_title", "path": "wiki/untitled.md"}])
+
+    def test_duplicate_declared_slugs_are_case_insensitive(self):
+        duplicates = [f for f in self.corpus.lint(_ctx("p"))["findings"]
+                      if f["kind"] == "duplicate_slug"]
+        self.assertEqual(duplicates, [{"kind": "duplicate_slug", "slug": "shared",
+                                      "paths": ["raw/reports/other.md", "wiki/nested/page.md"]}])
+
+    def test_lint_refuses_an_unconfigured_project(self):
+        with self.assertRaises(DocsBackendError) as cm:
+            self.corpus.lint(_ctx("other"))
+        self.assertEqual(cm.exception.status, 404)
+
+
 class MalformedCorpusTests(unittest.TestCase):
     """One bad document must not take the project's docs tools down."""
 
@@ -470,7 +516,7 @@ class ReposHotReloadTests(unittest.TestCase):
         self.assertFalse(self.corpus.has_project("q"))
         self._write({
             "p": {"url": self.remote, "branch": "master"},
-            "q": {"url": self.remote, "branch": "master"},
+            "q": {"url": _make_remote(self.tmp, "new-docs", {"wiki/x.md": "# X\n"}), "branch": "master"},
         })
         self.assertTrue(self.corpus.has_project("q"))
         self.assertEqual(self.corpus.get("wiki/x.md", _ctx("q"))["title"], "X")
@@ -513,6 +559,13 @@ class ReposHotReloadTests(unittest.TestCase):
         for key in ("ok-name.v2", "_scratch"):  # dots inside and a leading underscore stay legal
             self.repos_file.write_text(json.dumps({key: {"url": "x", "branch": "main"}}))
             self.assertIn(key, load_docs_repos(str(self.repos_file)))
+
+    # Position: follows test_a_repos_key_that_is_not_a_plain_name_is_refused.
+    def test_two_projects_cannot_map_the_same_repo_url(self):
+        for other in ("https://github.com/org/docs.git", "https://GITHUB.com/ORG/DOCS.git"):
+            self._write({"p": {"url": "https://github.com/org/docs.git"}, "q": {"url": other}})
+            with self.assertRaisesRegex(ValueError, "same docs repo URL"):
+                load_docs_repos(str(self.repos_file))
 
     def test_no_repos_file_means_no_reload_attempt(self):
         corpus = DocsCorpus({"p": {"url": self.remote, "branch": "master"}},
@@ -847,8 +900,8 @@ class SnapshotConsistencyTests(unittest.TestCase):
         def move_head_then_load(d, commit):
             # Another writer advances the working clone between rev-parse and ls-tree.
             _write_files(str(d), {"wiki/x.md": "# SECOND\n"})
-            _sh(str(d), "git", "-c", "user.email=t@e.com", "-c", "user.name=T", "add", "-A")
-            _sh(str(d), "git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "moved")
+            _sh(str(d), "git", "-c", "user.email=t@example.com", "-c", "user.name=T", "add", "-A")
+            _sh(str(d), "git", "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "moved")
             return original(d, commit)
 
         corpus._snapshots.clear()

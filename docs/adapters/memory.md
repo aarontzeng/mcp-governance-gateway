@@ -91,6 +91,15 @@ project's items — the server-side filter is not trusted), sorts newest-first, 
 paginates. The bounded fetch caps memory use; a `truncated` flag signals when a
 project may hold more than the fetch cap.
 
+`memory.lesson_list` and `memory.action_list` explicitly request up to 5,000
+project rows, including other contributors' entries, so the backend's default
+page cannot silently narrow the input before confidence sorting or completed
+action filtering. Both re-check each row's project before applying the caller's
+`limit`. Their envelopes include `count` (returned rows), `total` (matching rows
+in the fetched window before the caller's limit), and `truncated` (the backend
+returned at least 5,000 rows, so more may exist). A truncated `total` is not a
+complete project count. These tools list the project; they have no `mine` filter.
+
 ## Write Limits
 
 The gateway rejects excessive `memory.save` calls before sending them to

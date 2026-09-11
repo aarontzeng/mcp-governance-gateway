@@ -13,6 +13,7 @@ from .auth import Principal
 from .confirm import ConfirmationStore
 from .ci_backend import JenkinsHttpBackend
 from .docs_backend import DocsBackendError, DocsCorpus
+from .docs_assets import AssetStageError
 from .issue_backend import IssueBackend, IssueBackendError
 from .limits import InMemoryMemoryWriteLimiter, MemoryLimitConfig, MemoryWriteLimiter
 from .memory_backend import MemoryBackend, MemoryBackendError, RequestContext
@@ -35,7 +36,7 @@ _ISSUE_TOOLS = _ISSUE_READ_TOOLS | _ISSUE_WRITE_TOOLS
 _ISSUE_WRITE_ROLE = "issue_writer"
 # Reads over the project's reviewed docs repo; tenancy is the token's project
 # claim (the corpus map is keyed by project — no new role needed).
-_DOCS_READ_TOOLS = frozenset({"docs.search", "docs.get", "docs.list", "docs.review_get"})
+_DOCS_READ_TOOLS = frozenset({"docs.search", "docs.get", "docs.list", "docs.lint", "docs.review_get", "docs.review_list"})
 # Writes PROPOSE: they open or revise a change on a review host under the
 # caller's own credential, and there is no tool that merges one. Two roles
 # because they are different acts -- writing a document and giving an opinion
@@ -47,8 +48,8 @@ _DOCS_READ_TOOLS = frozenset({"docs.search", "docs.get", "docs.list", "docs.revi
 # Giving the comment path its own credential slot would let a deployment enrol a
 # genuinely comment-only token; it would also make everyone enrol twice, so it
 # waits for someone who wants it (roadmap).
-_DOCS_WRITE_TOOLS = frozenset({"docs.create", "docs.update"})
-_DOCS_REVIEW_TOOLS = frozenset({"docs.review_comment"})
+_DOCS_WRITE_TOOLS = frozenset({"docs.create", "docs.update", "docs.review_abandon", "docs.asset_stage_url"})
+_DOCS_REVIEW_TOOLS = frozenset({"docs.review_comment", "docs.review_add_reviewer"})
 _DOCS_WRITE_ROLE = "docs_writer"
 _DOCS_REVIEW_ROLE = "docs_reviewer"
 _DOCS_TOOLS = _DOCS_READ_TOOLS | _DOCS_WRITE_TOOLS | _DOCS_REVIEW_TOOLS
@@ -58,7 +59,7 @@ _CI_READ_TOOLS = frozenset({"ci.status", "ci.log", "ci.builds", "ci.artifact"})
 # project may START, which is not the set it may watch), its own role, and the
 # confirmation gate. It is in _CI_TOOLS for dispatch and visibility, and NOT in
 # the read set, because the blanket "ci read" allow must not reach it.
-_CI_WRITE_TOOLS = frozenset({"ci.rerun"})
+_CI_WRITE_TOOLS = frozenset({"ci.rerun", "ci.stop"})
 _CI_WRITE_ROLE = "ci_runner"
 _CI_TOOLS = _CI_READ_TOOLS | _CI_WRITE_TOOLS
 
@@ -130,6 +131,7 @@ class GatewayApp:
         docs_corpus: DocsCorpus | None = None,
         ci_backend: JenkinsHttpBackend | None = None,
         docs_review: Any = None,
+        asset_stage: Any = None,
     ) -> None:
         self._memory_backend = memory_backend
         self._audit_sink = audit_sink
@@ -143,6 +145,7 @@ class GatewayApp:
         # docs read tools do not need it, which is why the corpus and the write
         # path are two objects rather than one.
         self._docs_review = docs_review
+        self._asset_stage = asset_stage
 
     def handle_rpc(self, message: dict[str, Any], principal: Principal) -> dict[str, Any] | None:
         if message.get("jsonrpc") != "2.0":
@@ -174,7 +177,8 @@ class GatewayApp:
                 self._docs_review.has_project(principal.project)
             tools = visible_tool_definitions(principal, self._issue_backend is not None, docs_enabled,
                                              ci_enabled, ci_write_enabled=ci_write_enabled,
-                                             docs_review_enabled=docs_review_enabled)
+                                             docs_review_enabled=docs_review_enabled,
+                                             docs_stage_enabled=self._asset_stage is not None)
             return _result(request_id, {"tools": tools})
         if method == "tools/call":
             return self._handle_tool_call(request_id, params, principal)
@@ -236,7 +240,7 @@ class GatewayApp:
             denied = PolicyDecision("deny", str(exc))
             self._audit(name, principal, gateway_request_id, denied, "denied", start=start)
             return _error(request_id, -32003, str(exc))
-        except (MemoryBackendError, IssueBackendError, DocsBackendError) as exc:
+        except (MemoryBackendError, IssueBackendError, DocsBackendError, AssetStageError) as exc:
             backend_status = str(exc.status) if exc.status is not None else "error"
             self._audit(
                 name, principal, gateway_request_id, decision, "backend_error",
@@ -252,6 +256,8 @@ class GatewayApp:
         # ci.rerun, whose queue item IS what the call created. Without the second
         # key a build trigger was audited with no handle on what it triggered.
         resource_id = (result.get("id") or result.get("queueItem")) if isinstance(result, dict) else None
+        if name == "ci.stop":
+            resource_id = f"{result['job']}:{result.get('queueItem') or result.get('build')}"
         self._audit(
             name, principal, gateway_request_id, decision, "ok",
             start=start, backend_status="ok", resource_id=resource_id,
@@ -427,6 +433,8 @@ class GatewayApp:
             return self._docs_corpus.get(path, context)
         if name == "docs.list":
             return self._docs_corpus.list(context)
+        if name == "docs.lint":
+            return self._docs_corpus.lint(context)
         if self._docs_review is None:
             raise DocsBackendError(
                 "this project's docs corpus is read-only: no review host is configured for it",
@@ -434,32 +442,78 @@ class GatewayApp:
             )
         if name == "docs.review_get":
             return self._docs_review.get(_required_change_ref(arguments), context)
-        if name == "docs.create":
+        if name == "docs.review_list":
+            limit = _optional_int(arguments, "limit", minimum=1, maximum=50)
+            return self._docs_review.list(limit if limit is not None else 20, context)
+        if name == "docs.review_add_reviewer":
+            reviewer = _required_text(arguments, "reviewer", max_len=39)
+            change_ref = _required_change_ref(arguments)
+            pending = self._confirmation_gate(
+                name, {"change": change_ref, "reviewer": reviewer}, arguments, principal,
+                f"Request review from {reviewer!r} on proposal #{change_ref}")
+            if pending is not None:
+                return pending
+            return self._docs_review.add_reviewer(change_ref, reviewer, context)
+        if name == "docs.review_abandon":
+            change_ref = _required_change_ref(arguments)
+            message = _optional_text(arguments, "message", max_len=20_000)
+            _reject_secret(find_secret(message or ""))
+            semantic = {"change": change_ref}
+            if message is not None:
+                semantic["message"] = message
+            pending = self._confirmation_gate(
+                name, semantic, arguments, principal, f"Withdraw your proposal #{change_ref}")
+            if pending is not None:
+                return pending
+            return self._docs_review.abandon(change_ref, message, context)
+        if name == "docs.asset_stage_url":
+            if not self._docs_review.has_project(context.project) or self._asset_stage is None:
+                raise DocsBackendError("staged content is not configured for this project", status=404)
+            kind = _required_text(arguments, "kind", max_len=16) if "kind" in arguments else "content"
+            return self._asset_stage.mint_upload_url(context.actor, context.project, principal.token_id, kind)
+        if name in ("docs.create", "docs.update"):
             path = _required_text(arguments, "path", max_len=500)
-            content = _required_text(arguments, "content", max_len=200_000)
+            if "contentStaged" in arguments and "content" in arguments:
+                raise ValueError("pass content OR contentStaged, not both")
+            staged_id = None
+            if "contentStaged" in arguments:
+                staged_id = _required_text(arguments, "contentStaged", max_len=64)
+                if not staged_id.startswith("doc_"):
+                    raise ValueError("contentStaged must be a doc_ id from docs.asset_stage_url(kind='content')")
+                if self._asset_stage is None:
+                    raise DocsBackendError("staged content is not configured on this gateway", status=404)
+                content = self._asset_stage.peek(staged_id, context.actor, context.project, principal.token_id)
+            else:
+                content = _required_text(arguments, "content", max_len=200_000)
             message = _required_text(arguments, "message", max_len=255)
             # Everything that gets committed, not just the prose: a document body
             # is the most likely place in this whole gateway for a pasted
             # credential to end up, and a corpus is team-visible.
             _reject_secret(find_secret(path, content, message))
+            # A stage is immutable: its id binds the body without asking the
+            # caller to resend it. Inline bodies must bind their full text.
+            semantic = {"path": path, "message": message,
+                        **({"contentStaged": staged_id} if staged_id is not None else {"content": content})}
+            base_sha = None
+            if name == "docs.update":
+                base_sha = _required_text(arguments, "sha", max_len=64)
+                semantic["sha"] = base_sha
             pending = self._confirmation_gate(
-                name, {"path": path, "message": message}, arguments, principal,
-                f"Propose a NEW document {path!r}")
+                name, semantic, arguments, principal, f"Propose a document change to {path!r}")
             if pending is not None:
                 return pending
-            return self._docs_review.create(path, content, message, context)
-        if name == "docs.update":
-            path = _required_text(arguments, "path", max_len=500)
-            content = _required_text(arguments, "content", max_len=200_000)
-            message = _required_text(arguments, "message", max_len=255)
-            base_sha = _required_text(arguments, "sha", max_len=64)
-            _reject_secret(find_secret(path, content, message))
-            pending = self._confirmation_gate(
-                name, {"path": path, "message": message, "sha": base_sha}, arguments, principal,
-                f"Propose a change to {path!r}")
-            if pending is not None:
-                return pending
-            return self._docs_review.update(path, content, message, base_sha, context)
+
+            def propose(body: str) -> dict[str, Any]:
+                if name == "docs.create":
+                    return self._docs_review.create(path, body, message, context)
+                return self._docs_review.update(path, body, message, base_sha, context)
+
+            if staged_id is not None:
+                # Claim across the host call so concurrent confirmations cannot
+                # both consume one body; a failed proposal releases it for retry.
+                with self._asset_stage.claim(staged_id, context.actor, context.project, principal.token_id) as body:
+                    return propose(body)
+            return propose(content)
         if name == "docs.review_comment":
             change_ref = _required_change_ref(arguments)
             body = _required_text(arguments, "body", max_len=20_000)
@@ -499,6 +553,20 @@ class GatewayApp:
             job = _required_text(arguments, "job", max_len=200)
             build = _optional_int(arguments, "build", minimum=1, maximum=1_000_000_000)
             return self._ci_backend.artifacts(job, context, build)
+        if name == "ci.stop":
+            job = _required_text(arguments, "job", max_len=200)
+            queue_item = _optional_int(arguments, "queueItem", minimum=1, maximum=1_000_000_000)
+            build = _optional_int(arguments, "build", minimum=1, maximum=1_000_000_000)
+            if (queue_item is None) == (build is None):
+                raise ValueError("pass exactly one of queueItem or build")
+            self._ci_backend.require_triggerable(job, context)
+            semantic = {"job": job, "queueItem": queue_item, "build": build}
+            pending = self._confirmation_gate(
+                name, semantic, arguments, principal,
+                f"Stop CI job {job!r}, " + (f"queue item {queue_item}" if queue_item is not None else f"build {build}"))
+            if pending is not None:
+                return pending
+            return self._ci_backend.stop(job, context, queue_item=queue_item, build=build)
         if name == "ci.rerun":
             job = _required_text(arguments, "job", max_len=200)
             # Allowlist FIRST, then the confirmation. Minting a nonce for a job
@@ -808,6 +876,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "type": "string",
                         "description": "Optional numeric user id (GitLab also accepts a username).",
                     },
+                    "startDate": {"type": "string", "description": "Optional YYYY-MM-DD. Redmine only."},
                     "dueDate": {"type": "string", "description": "Optional YYYY-MM-DD. Redmine only."},
                     "priority": {
                         "type": "string",
@@ -867,6 +936,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "type": "string",
                         "description": "Optional numeric user id (GitLab also accepts a username).",
                     },
+                    "startDate": {"type": "string", "description": "Optional YYYY-MM-DD. Redmine only."},
                     "dueDate": {"type": "string", "description": "Optional YYYY-MM-DD. Redmine only."},
                     "priority": {
                         "type": "string",
@@ -933,23 +1003,32 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "docs.lint",
+            "description": "Read-only findings for this project's corpus: broken relative Markdown links, missing titles and duplicate slugs. Findings are not a verdict.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
             "name": "docs.create",
             "description": (
                 "Propose a NEW document as a change on this project's review host (two-step: call "
                 "once for a confirmationId, then again with `confirm`). It does NOT publish — it "
                 "opens a proposal under YOUR OWN identity for a person to merge or reject. Refused "
                 "if the path already exists (use docs.update), if the path is not a .md file "
-                "under a served directory, or if the body contains something credential-shaped."
+                "under a served directory, or if the body contains something credential-shaped. "
+                "For long bodies, call docs.asset_stage_url(kind='content'), PUT the Markdown once "
+                "with your bearer token, and use contentStaged instead of content in both calls."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path within the corpus, e.g. wiki/onboarding.md"},
                     "content": {"type": "string", "description": "The whole document, including frontmatter."},
+                    "contentStaged": {"type": "string", "description": "A doc_ stagedId; mutually exclusive with content. Confirmation binds to this immutable body id."},
                     "message": {"type": "string", "description": "Why, in one line. Becomes the proposal title."},
                     "confirm": {"type": "string"},
                 },
-                "required": ["path", "content", "message"],
+                "required": ["path", "message"],
+                "oneOf": [{"required": ["content"]}, {"required": ["contentStaged"]}],
                 "additionalProperties": False,
             },
         },
@@ -960,18 +1039,22 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "`sha` that docs.get returned for it: if the document moved since you read it the "
                 "proposal is refused rather than overwriting someone's edit. Opens a proposal under "
                 "your own identity; publishing stays a human action. Refused if the body contains "
-                "something credential-shaped."
+                "something credential-shaped. For long bodies, call docs.asset_stage_url(kind='content'), "
+                "PUT the Markdown once with your bearer token, then use contentStaged instead of content "
+                "in both prepare and confirm calls."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string", "description": "The whole document after your change."},
+                    "contentStaged": {"type": "string", "description": "A doc_ stagedId; mutually exclusive with content. Confirmation binds to this immutable body id."},
                     "message": {"type": "string"},
                     "sha": {"type": "string", "description": "The `sha` docs.get returned for this path."},
                     "confirm": {"type": "string"},
                 },
-                "required": ["path", "content", "message", "sha"],
+                "required": ["path", "message", "sha"],
+                "oneOf": [{"required": ["content"]}, {"required": ["contentStaged"]}],
                 "additionalProperties": False,
             },
         },
@@ -1001,6 +1084,44 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {"change": {"type": "integer", "minimum": 1}},
                 "required": ["change"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "docs.review_list",
+            "description": "List open proposals in this project's corpus repository, most recently updated first (read-only, no confirmation). Rows include number, title, author, updated, url and isAuthor for your enrolled host identity.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "docs.review_add_reviewer",
+            "description": "Request review from a named account on an open proposal in this project's corpus repository. Idempotent and audit-logged; needs docs_reviewer. Requires two-step confirmation because it changes requested reviewers on the host.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"change": {"type": "integer", "minimum": 1}, "reviewer": {"type": "string"}, "confirm": {"type": "string"}},
+                "required": ["change", "reviewer"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "docs.review_abandon",
+            "description": "Withdraw your OWN open proposal in this project's corpus repository. Author-only on the review host; anyone else's proposal is human-only. Needs docs_writer and two-step confirmation; optional message is stamped. Closes the proposal without deleting its branch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"change": {"type": "integer", "minimum": 1}, "message": {"type": "string"}, "confirm": {"type": "string"}},
+                "required": ["change"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "docs.asset_stage_url",
+            "description": "Stage one UTF-8 Markdown body (content only). Returns a doc_ stagedId and a single-use upload URL valid for 60 seconds. PUT the bytes to that URL with your gateway bearer token, then pass contentStaged to docs.create/update in both confirmation steps. Maximum 2 MiB; uploaded bodies expire after one hour and remain reusable after a failed proposal. Needs docs_writer; staging itself requires no confirmation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"kind": {"type": "string", "enum": ["content"], "default": "content"}},
                 "additionalProperties": False,
             },
         },
@@ -1063,6 +1184,26 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "ci.stop",
+            "description": (
+                "Cancel a queued item or stop an explicit build. Pass exactly one of queueItem "
+                "or build. Uses the same ci_runner role and trigger allowlist as ci.rerun. "
+                "Call once for a confirmationId, then again with confirm. Queue ownership is "
+                "checked before cancellation; an item that already started must be stopped by build number."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job": {"type": "string"},
+                    "queueItem": {"type": "integer", "minimum": 1},
+                    "build": {"type": "integer", "minimum": 1},
+                    "confirm": {"type": "string"},
+                },
+                "required": ["job"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "ci.artifact",
             "description": (
                 "List one build's artifacts for a CI job: fileName, relativePath and a gateway "
@@ -1090,6 +1231,7 @@ def tool_definitions() -> list[dict[str, Any]]:
 def visible_tool_definitions(
     principal: Principal, issue_enabled: bool, docs_enabled: bool = False, ci_enabled: bool = False,
     ci_write_enabled: bool = False, docs_review_enabled: bool = False,
+    docs_stage_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     # Advertise only the tools this principal could actually call: issue tools need
     # the backend configured and an issue_project, and issue writes need the write
@@ -1106,8 +1248,10 @@ def visible_tool_definitions(
                 continue
         if name in _DOCS_TOOLS and not docs_enabled:
             continue
-        if name in (_DOCS_WRITE_TOOLS | _DOCS_REVIEW_TOOLS | {"docs.review_get"}) \
+        if name in (_DOCS_WRITE_TOOLS | _DOCS_REVIEW_TOOLS | {"docs.review_get", "docs.review_list"}) \
                 and not docs_review_enabled:
+            continue
+        if name == "docs.asset_stage_url" and not docs_stage_enabled:
             continue
         if name in _DOCS_WRITE_TOOLS and _DOCS_WRITE_ROLE not in principal.roles:
             continue
@@ -1216,7 +1360,7 @@ def _planning_texts(planning: dict[str, Any]) -> list[str]:
 
 
 def _planning_fields(arguments: dict[str, Any]) -> dict[str, Any]:
-    """dueDate / priority / parentIssue / category — shared by issues.create and
+    """startDate / dueDate / priority / parentIssue / category — shared by issues.create and
     issues.update_status.
 
     Only shape is checked here; the backend owns the meaning (a real calendar date,
@@ -1225,6 +1369,9 @@ def _planning_fields(arguments: dict[str, Any]) -> dict[str, Any]:
     per-project and member-editable, so there is no fixed enum to validate here).
     """
     planning: dict[str, Any] = {}
+    start_date = _optional_text(arguments, "startDate", max_len=10)
+    if start_date is not None:
+        planning["startDate"] = start_date
     due_date = _optional_text(arguments, "dueDate", max_len=10)
     if due_date is not None:
         planning["dueDate"] = due_date

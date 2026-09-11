@@ -42,6 +42,9 @@ class _Corpus:
             raise ReviewBackendError("document not found", status=404)
         return {"path": path, "sha": "blob-sha"}
 
+    def lint(self, context):
+        return {"findings": [{"kind": "broken_link", "path": "wiki/x.md"}], "count": 1}
+
 
 class _Backend:
     """Records what it was asked to do, and what credential it was handed."""
@@ -64,6 +67,18 @@ class _Backend:
     def get_change(self, spec, change_ref, credential, context):
         self.calls.append(("get", change_ref, credential))
         return {"number": change_ref, "state": "open", "merged": False}
+
+    def list_changes(self, spec, limit, credential, context):
+        self.calls.append(("list", spec.repo, limit, credential))
+        return {"changes": [{"number": 7, "isAuthor": True}], "count": 1}
+
+    def add_reviewer(self, spec, change_ref, reviewer, credential, context):
+        self.calls.append(("reviewer", spec.repo, change_ref, reviewer, credential))
+        return {"number": change_ref, "reviewer": reviewer}
+
+    def close_change(self, spec, change_ref, message, credential, context):
+        self.calls.append(("close", spec.repo, change_ref, message, credential))
+        return {"number": change_ref, "abandoned": True}
 
 
 def _service(present=(), state=KeyState.OK, credential="ghp-caller", spec=SPEC, backends=None):
@@ -300,6 +315,189 @@ class GatewayTests(unittest.TestCase):
         for bad in (0, -1, "7", 1.5, True, None):
             resp = self._call(self.reviewer, "docs.review_comment", {"change": bad, "body": "x"})
             self.assertIn("error", resp, bad)
+        self.assertEqual(self.backend.calls, [])
+
+    def test_review_list_uses_the_project_spec_without_confirmation(self):
+        result = self._call(self.reader, "docs.review_list", {"limit": 4})["result"]["structuredContent"]
+        self.assertEqual(result["changes"][0]["number"], 7)
+        self.assertEqual(self.backend.calls, [("list", "org/handbook", 4, "ghp-caller")])
+
+    def test_adding_a_reviewer_is_role_guarded_confirmed_and_audited(self):
+        args = {"change": 7, "reviewer": "alex"}
+        self.assertIn("error", self._call(self.reader, "docs.review_add_reviewer", args))
+        first = self._call(self.reviewer, "docs.review_add_reviewer", args)["result"]["structuredContent"]
+        self.assertTrue(first["confirmationRequired"])
+        self.assertEqual(self.backend.calls, [])
+        for changed in ({"change": 8}, {"reviewer": "sam"}):
+            result = self._call(self.reviewer, "docs.review_add_reviewer",
+                                {**args, **changed, "confirm": first["confirmationId"]})
+            self.assertTrue(result["result"]["structuredContent"]["confirmationRequired"])
+            self.assertEqual(self.backend.calls, [])
+        result = self._call(self.reviewer, "docs.review_add_reviewer",
+                            {**args, "confirm": first["confirmationId"]})["result"]["structuredContent"]
+        self.assertEqual(result["reviewer"], "alex")
+        self.assertEqual(self.backend.calls, [("reviewer", "org/handbook", 7, "alex", "ghp-caller")])
+        self.assertEqual(self.audit.events[-1].tool, "docs.review_add_reviewer")
+        self.assertEqual(self.audit.events[-1].outcome, "ok")
+
+    def test_abandon_is_writer_only_and_binds_its_message_before_closing(self):
+        args = {"change": 7, "message": "Superseded"}
+        self.assertIn("error", self._call(self.reviewer, "docs.review_abandon", args))
+        first = self._call(self.writer, "docs.review_abandon", args)["result"]["structuredContent"]
+        self.assertTrue(first["confirmationRequired"])
+        self.assertEqual(self.backend.calls, [])
+        changed = self._call(self.writer, "docs.review_abandon",
+                             {**args, "message": "Different", "confirm": first["confirmationId"]})
+        self.assertTrue(changed["result"]["structuredContent"]["confirmationRequired"])
+        self.assertEqual(self.backend.calls, [])
+        pending = self._call(self.writer, "docs.review_abandon", args)["result"]["structuredContent"]
+        result = self._call(self.writer, "docs.review_abandon",
+                            {**args, "confirm": pending["confirmationId"]})["result"]["structuredContent"]
+        self.assertTrue(result["abandoned"])
+        self.assertEqual(self.backend.calls[0][:3], ("close", "org/handbook", 7))
+
+    def test_lint_is_available_on_a_read_only_corpus(self):
+        import tempfile
+        from pathlib import Path
+        from test_docs_backend import _make_remote
+        from mcp_governance_gateway.docs_backend import DocsCorpus
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        remote = _make_remote(tmp.name, "lint", {"wiki/x.md": "# X\n[Missing](missing.md)\n"})
+        self.app._docs_corpus = DocsCorpus({"team-a": {"url": remote, "branch": "master"}},
+                                           str(Path(tmp.name) / "clones"))
+        self.app._docs_review = None
+        self.assertIn("docs.lint", self._names(self.reader))
+        result = self._call(self.reader, "docs.lint", {})["result"]["structuredContent"]
+        self.assertEqual(result["findings"][0]["kind"], "broken_link")
+        self.assertEqual(set(result), {"findings", "count", "commit"})
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["findings"], [{"kind": "broken_link", "path": "wiki/x.md", "target": "missing.md"}])
+
+    def test_inline_confirmation_cannot_be_reused_for_a_different_body(self):
+        for tool in ("docs.create", "docs.update"):
+            args = {"path": "wiki/x.md", "content": "original", "message": "m"}
+            if tool == "docs.update":
+                args["sha"] = "blob-sha"
+            pending = self._call(self.writer, tool, args)["result"]["structuredContent"]
+            result = self._call(self.writer, tool, {**args, "content": "substitute",
+                                "confirm": pending["confirmationId"]})["result"]["structuredContent"]
+            self.assertTrue(result["confirmationRequired"])
+        self.assertEqual(self.backend.calls, [])
+
+    def _stage_body(self, body):
+        minted = self.app._asset_stage.mint_upload_url("1", "team-a", "t1", "content")
+        self.app._asset_stage.accept_upload(minted["url"].rsplit("/", 1)[1], body.encode(), "1", "team-a", "t1")
+        return minted["stagedId"]
+
+    def _enable_stage(self):
+        from mcp_governance_gateway.docs_assets import AssetStage
+        self.now = 0
+        self.app._asset_stage = AssetStage("https://gateway.example", clock=lambda: self.now)
+
+    def test_staged_confirmation_lands_exact_body_and_consumes_it(self):
+        self._enable_stage()
+        for tool in ("docs.create", "docs.update"):
+            body = "# Long\n" + "text " * 7000 + "\n"
+            sid = self._stage_body(body)
+            args = {"path": "wiki/x.md", "message": "Long page", "contentStaged": sid}
+            if tool == "docs.update":
+                args["sha"] = "blob-sha"
+            first = self._call(self.writer, tool, args)["result"]["structuredContent"]
+            self.assertEqual(set(first["arguments"]), set(args))
+            self.assertEqual(first["arguments"]["contentStaged"], sid)
+            self.assertNotIn("content", first["arguments"])
+            result = self._call(self.writer, tool, {**args, "confirm": first["confirmationId"]})
+            self.assertEqual(result["result"]["structuredContent"]["status"], "proposed")
+            self.assertEqual(self.backend.calls[-1][2], body)
+            replay = self._call(self.writer, tool, args)
+            self.assertTrue(replay["result"]["isError"])
+
+    # Position: follows test_staged_confirmation_lands_exact_body_and_consumes_it.
+    def test_tool_minted_stage_cannot_be_prepared_by_another_token(self):
+        from dataclasses import replace
+        self._enable_stage()
+        minted = self._call(self.writer, "docs.asset_stage_url", {})["result"]["structuredContent"]
+        self.app._asset_stage.accept_upload(minted["url"].rsplit("/", 1)[1], b"# Mine",
+                                           "1", "team-a", "t1")
+        args = {"path": "wiki/x.md", "message": "m", "contentStaged": minted["stagedId"]}
+        result = self._call(replace(self.writer, token_id="t2"), "docs.create", args)
+        self.assertTrue(result["result"]["isError"])
+        self.assertNotIn("confirmationId", json.dumps(result))
+        self.assertEqual(self.backend.calls, [])
+        pending = self._call(self.writer, "docs.create", args)["result"]["structuredContent"]
+        result = self._call(self.writer, "docs.create", {**args, "confirm": pending["confirmationId"]})
+        self.assertEqual(result["result"]["structuredContent"]["status"], "proposed")
+
+    def test_staged_confirmation_refuses_inline_substitution_and_both_body_keys(self):
+        self._enable_stage()
+        sid = self._stage_body("# Original\n")
+        args = {"path": "wiki/x.md", "message": "m", "contentStaged": sid}
+        pending = self._call(self.writer, "docs.create", args)["result"]["structuredContent"]
+        for body in ("# Different", "", None):
+            result = self._call(self.writer, "docs.create",
+                                {**args, "content": body, "confirm": pending["confirmationId"]})
+            self.assertIn("not both", result["error"]["message"])
+        result = self._call(self.writer, "docs.create", {"path": "wiki/x.md", "message": "m",
+                            "content": "# Different", "confirm": pending["confirmationId"]})
+        self.assertTrue(result["result"]["structuredContent"]["confirmationRequired"])
+        self.assertEqual(self.backend.calls, [])
+
+    def test_stage_expired_after_prepare_is_a_tool_error_at_confirm(self):
+        self._enable_stage()
+        args = {"path": "wiki/x.md", "message": "m", "contentStaged": self._stage_body("# Expires")}
+        pending = self._call(self.writer, "docs.create", args)["result"]["structuredContent"]
+        self.now = 3601
+        result = self._call(self.writer, "docs.create", {**args, "confirm": pending["confirmationId"]})
+        self.assertTrue(result["result"]["isError"])
+        self.assertIn("unknown stagedId", json.dumps(result))
+        self.assertEqual(self.audit.events[-1].backend_status, "404")
+        self.assertEqual(self.backend.calls, [])
+
+    # Position: follows test_stage_expired_after_prepare_is_a_tool_error_at_confirm.
+    def test_expired_stage_is_a_tool_error_before_confirmation(self):
+        self._enable_stage()
+        args = {"path": "wiki/x.md", "message": "m", "contentStaged": self._stage_body("# Expires")}
+        self.now = 3601
+        result = self._call(self.writer, "docs.create", args)
+        self.assertTrue(result["result"]["isError"])
+        self.assertNotIn("confirmationId", json.dumps(result))
+        self.assertEqual(self.audit.events[-1].backend_status, "404")
+        self.assertEqual(self.backend.calls, [])
+
+    def test_failed_proposal_leaves_staged_body_reusable(self):
+        from unittest.mock import patch
+        self._enable_stage()
+        sid = self._stage_body("# Retry me\n")
+        args = {"path": "wiki/x.md", "message": "m", "contentStaged": sid}
+        pending = self._call(self.writer, "docs.create", args)["result"]["structuredContent"]
+        with patch.object(self.backend, "open_change", side_effect=ReviewBackendError("host unavailable", status=502)):
+            result = self._call(self.writer, "docs.create", {**args, "confirm": pending["confirmationId"]})
+        self.assertTrue(result["result"]["isError"])
+        self.assertEqual(self.app._asset_stage.peek(sid, "1", "team-a", "t1"), "# Retry me\n")
+        pending = self._call(self.writer, "docs.create", args)["result"]["structuredContent"]
+        result = self._call(self.writer, "docs.create", {**args, "confirm": pending["confirmationId"]})
+        self.assertEqual(result["result"]["structuredContent"]["status"], "proposed")
+
+    def test_staging_discovery_requires_configuration_project_and_writer(self):
+        self.assertNotIn("docs.asset_stage_url", self._names(self.writer))
+        self._enable_stage()
+        self.assertIn("docs.asset_stage_url", self._names(self.writer))
+        self.assertNotIn("docs.asset_stage_url", self._names(self.reader))
+        result = self._call(self.writer, "docs.asset_stage_url", {"kind": "content"})
+        self.assertTrue(result["result"]["structuredContent"]["stagedId"].startswith("doc_"))
+        other = Principal(actor="1", project="team-b", roles=("docs_writer",), token_id="t2")
+        self.assertNotIn("docs.asset_stage_url", self._names(other))
+        self.assertTrue(self._call(other, "docs.asset_stage_url", {})["result"]["isError"])
+
+    def test_staged_body_prefix_and_secret_are_checked_before_confirmation(self):
+        self._enable_stage()
+        args = {"path": "wiki/x.md", "message": "m", "contentStaged": "ast_not-content"}
+        result = self._call(self.writer, "docs.create", args)
+        self.assertIn("doc_", result["error"]["message"])
+        args["contentStaged"] = self._stage_body("ghp_1234567890abcdefghijklmnopqrstuvwxyzAB")
+        result = self._call(self.writer, "docs.create", args)
+        self.assertIn("possible secret", result["error"]["message"])
         self.assertEqual(self.backend.calls, [])
 
 
