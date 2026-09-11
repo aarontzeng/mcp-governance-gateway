@@ -10,20 +10,34 @@ server-side, not trusted from the client.**
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "ui-sans-serif, system-ui, sans-serif", "fontSize": "14px", "primaryTextColor": "#1f2937", "lineColor": "#64748b", "clusterBkg": "#f1f5f9", "clusterBorder": "#94a3b8"}}}%%
 flowchart LR
-    A["AI coding agents<br/>Claude Code · Codex · Cursor · any MCP client"]
+    A["🤖 AI coding agents<br/>Claude Code · Codex · Cursor · any MCP client"]
     A -- "MCP over HTTP<br/>one bearer token" --> G
-    subgraph G["MCP Governance Gateway"]
-        direction TB
-        T["token → project<br/>the tenant is never a tool argument"]
-        C["confirm-gated writes<br/>prepare → single-use id → commit"]
-        R["roles, default-deny<br/>issue_writer · docs_writer · docs_reviewer · ci_runner"]
-        U["per-user attribution<br/>every call audited, every write stamped"]
+    subgraph G["🛡️ MCP Governance Gateway — enforced on the server"]
+        direction LR
+        T["🔑 token → project<br/>the tenant is never<br/>a tool argument"]
+        C["✅ confirm-gated writes<br/>prepare → single-use id<br/>→ commit"]
+        R["🚪 roles, default-deny<br/>issue_writer · docs_writer<br/>docs_reviewer · ci_runner"]
+        U["🧾 per-user attribution<br/>every call audited,<br/>every write stamped"]
     end
-    G --> M[("team memory<br/>agentmemory")]
-    G --> I[("issues<br/>Redmine or GitLab")]
-    G --> D[("docs corpus<br/>git repos + pull requests")]
-    G --> J[("CI<br/>Jenkins")]
+    G --> M[("🧠 team memory<br/>agentmemory")]
+    G --> I[("🎫 issues<br/>Redmine or GitLab")]
+    G --> D[("📚 docs corpus<br/>git repos + pull requests")]
+    G --> J[("🏗️ CI<br/>Jenkins")]
+
+    classDef agents fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef tenant fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#134e4a
+    classDef confirm fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef roles fill:#ffe4e6,stroke:#e11d48,stroke-width:2px,color:#881337
+    classDef audit fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef backend fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    class A agents
+    class T tenant
+    class C confirm
+    class R roles
+    class U audit
+    class M,I,D,J backend
 ```
 
 A governance and multi-tenancy layer between AI coding agents and the backends a team
