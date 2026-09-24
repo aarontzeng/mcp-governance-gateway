@@ -1,4 +1,8 @@
-FROM python:3.12-slim
+# Pinned by digest so a rebuild of the same commit gets the same base; the tag
+# stays for the reader. Dependabot (docker ecosystem) proposes the new digest
+# monthly, which is how base-image security fixes arrive -- a pin nobody bumps
+# would freeze them out instead.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 
 WORKDIR /app
 
@@ -25,5 +29,12 @@ USER 65532:65532
 ENV HOME=/home/nonroot
 ENV GATEWAY_HOST=0.0.0.0
 ENV GATEWAY_PORT=8080
+
+# Liveness only: /healthz answers without a bearer and calls no backend. The
+# image has no curl, so it is Python's own urllib -- with proxies disabled, since
+# an HTTP(S)_PROXY an operator sets for the backends must not carry a probe of
+# 127.0.0.1. A wildcard bind is probed on loopback; a specific one, on itself.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python -c "import os, urllib.request as u; h = os.environ.get('GATEWAY_HOST', '127.0.0.1'); h = '127.0.0.1' if h in ('', '0.0.0.0') else h; u.build_opener(u.ProxyHandler({})).open('http://%s:%s/healthz' % (h, os.environ.get('GATEWAY_PORT', '8080')), timeout=4)"
 
 CMD ["mcp-governance-gateway"]

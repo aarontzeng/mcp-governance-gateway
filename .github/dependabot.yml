@@ -8,3 +8,8 @@ updates:
     directory: /
     schedule:
       interval: monthly
+  # The Dockerfile pins its base image by digest; this is what moves the pin.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
