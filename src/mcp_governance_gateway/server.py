@@ -24,6 +24,7 @@ from typing import Any
 from urllib import error, request
 from urllib.parse import urlsplit
 
+from . import __version__
 from .artifact_route import stream_artifact
 from .audit import AuditSink, JsonLinesAuditSink
 from .auth import AuthError, BearerTokenAuthenticator, IdentityVerifier, Principal
@@ -177,7 +178,10 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
         # ------------------------------------------------------------- routes
 
         def _healthz(self, match: re.Match[str]) -> None:
-            payload: dict[str, Any] = {"ok": True}
+            # The version answers "which build is this instance running" during a
+            # rollout without a bearer. It is unauthenticated like the rest of this
+            # route, so an ingress that publishes /healthz publishes it too.
+            payload: dict[str, Any] = {"ok": True, "version": __version__}
             if self.server.keystore is not None:
                 payload["keystoreDegraded"] = self.server.keystore.degraded
             if self.server.oidc_grants is not None:
@@ -483,6 +487,7 @@ def _build_docs(
         load_docs_repos(settings.docs_repos_file),
         settings.docs_clone_dir,
         pull_interval_sec=settings.docs_pull_interval_sec,
+        git_timeout_sec=settings.docs_git_timeout_sec,
         repos_file=settings.docs_repos_file,
         actor_labels=actor_labels,
     )

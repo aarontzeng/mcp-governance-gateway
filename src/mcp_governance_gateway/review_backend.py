@@ -50,14 +50,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib import parse
 
+from .attribution import footer
 from .errors import BackendError
 from .http_client import JsonHttpClient
 from .memory_backend import RequestContext
-
-# The attribution footer, in the shape `issue_backend` already stamps on notes.
-# Its presence is what tells a human reader that a comment came through the
-# gateway rather than from the person directly, so it is not decoration.
-FOOTER = "[via mcp-governance-gateway | actor={actor} | audit={request_id}]"
 
 
 class ReviewBackendError(BackendError):
@@ -185,7 +181,9 @@ def stamped(body: str, context: RequestContext) -> str:
     Never optional: an unstamped comment is indistinguishable from one the person
     wrote themselves, and the difference is the point.
     """
-    return f"{body.rstrip()}\n\n{FOOTER.format(actor=context.actor, request_id=context.request_id)}"
+    # The full stamp, actor included, as review comments have always carried --
+    # not the trimmed one a personal-credential tracker write gets.
+    return f"{body.rstrip()}\n\n{footer(context)}"
 
 
 # Printable ASCII only. A credential is going into an HTTP header, and

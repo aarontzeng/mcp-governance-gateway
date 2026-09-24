@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import date
 from typing import Any
 
+from .attribution import footer
 from .errors import BackendError
 from .http_client import JsonHttpClient
 from .memory_backend import RequestContext
@@ -76,14 +77,7 @@ def _enrollment_hint(portal_url: str | None) -> str:
     return f" -> {portal_url}" if portal_url else ""
 
 
-def _attribution(context: RequestContext, *, personal: bool = False) -> str:
-    # With a personal key the Redmine author is already the real user, so the stamp
-    # is trimmed to just the audit id — kept (not dropped) so the write is still
-    # marked as agent/gateway-mediated and correlates to the audit log. With the
-    # shared service key the author is the service account, so the actor is named too.
-    if personal:
-        return f"[via mcp-governance-gateway | audit={context.request_id}]"
-    return f"[via mcp-governance-gateway | actor={context.actor} | audit={context.request_id}]"
+_attribution = footer   # the name gitlab_backend imports
 
 
 def _with_attribution(text: str | None, context: RequestContext, *, personal: bool = False) -> str:

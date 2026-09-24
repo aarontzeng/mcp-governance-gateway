@@ -277,6 +277,13 @@ only if the system fails closed:
 - no write operations when policy, audit, identity-assertion validation, or
   secret storage is unhealthy
 
+**`GET /healthz`** needs no bearer and answers `{"ok": true, "version": ...}`,
+plus `keystoreDegraded` when a credential store is configured and
+`oidcGrantsStale` when OIDC is. It is a liveness probe, not a readiness one: it
+does not call any backend. Because it is unauthenticated, an ingress that
+publishes it publishes the running version too; route it to your probe network
+only if that matters to you. The container image's `HEALTHCHECK` calls it.
+
 Production rollout should add health checks, backup/restore, token revocation
 procedures, backend secret rotation procedures, and optional gateway
 replication.

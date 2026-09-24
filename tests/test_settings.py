@@ -90,3 +90,29 @@ class SettingsTests(unittest.TestCase):
             "os.environ", {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", "JENKINS_TIMEOUT_SEC": "3600"}, clear=True,
         ):
             self.assertEqual(Settings.from_env().jenkins_timeout_sec, 3600.0)
+
+    def test_the_docs_git_timeout_is_configurable_and_reaches_the_corpus(self) -> None:
+        # DocsCorpus always took a git timeout; nothing passed one, so every git
+        # call ran under the 30 s default however large the corpus.
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from mcp_governance_gateway.memory_backend import ActorLabels
+        from mcp_governance_gateway.server import _build_docs
+
+        with tempfile.TemporaryDirectory() as d:
+            repos = Path(d) / "repos.json"
+            repos.write_text(json.dumps({"p": {"url": "https://git.example/docs.git"}}), encoding="utf-8")
+            base = {"GATEWAY_TOKEN_FILE": "/tmp/tokens.json", "DOCS_REPOS_FILE": str(repos), "DOCS_CLONE_DIR": d}
+            with mock.patch.dict("os.environ", base, clear=True):
+                self.assertEqual(Settings.from_env().docs_git_timeout_sec, 30.0)
+            with mock.patch.dict("os.environ", {**base, "DOCS_GIT_TIMEOUT_SEC": "240"}, clear=True):
+                settings = Settings.from_env()
+            corpus, _, _ = _build_docs(settings, ActorLabels(None), None)
+            assert corpus is not None
+            self.assertEqual(corpus._git_timeout, 240.0)
+            with mock.patch.dict("os.environ", {**base, "DOCS_GIT_TIMEOUT_SEC": "0"}, clear=True):
+                with self.assertRaises(ValueError) as cm:
+                    Settings.from_env()
+            self.assertIn("DOCS_GIT_TIMEOUT_SEC", str(cm.exception))

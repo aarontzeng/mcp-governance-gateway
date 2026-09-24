@@ -78,6 +78,9 @@ class Settings:
     docs_repos_file: str | None = None
     docs_clone_dir: str | None = None
     docs_pull_interval_sec: float = 300.0
+    # Per git invocation (clone, fetch, ls-tree, cat-file, log). The first clone
+    # of a large corpus is the call that needs the room.
+    docs_git_timeout_sec: float = 30.0
     # Timeout for calls to a docs review host (GitHub/GitLab), separate from the
     # corpus git timeout: one is a remote API, the other a local clone.
     docs_review_timeout_sec: float = 20.0
@@ -178,6 +181,7 @@ class Settings:
             docs_repos_file=os.environ.get("DOCS_REPOS_FILE") or None,
             docs_clone_dir=os.environ.get("DOCS_CLONE_DIR") or None,
             docs_pull_interval_sec=float(os.environ.get("DOCS_PULL_INTERVAL_SEC", "300")),
+            docs_git_timeout_sec=_timeout_env("DOCS_GIT_TIMEOUT_SEC", default=30.0),
             docs_review_timeout_sec=_timeout_env("DOCS_REVIEW_TIMEOUT_SEC", default=20.0),
             docs_asset_base_url=_url_env("DOCS_ASSET_BASE_URL"),
             jenkins_base_url=_url_env("JENKINS_BASE_URL"),

@@ -145,6 +145,15 @@ class RoutingTests(_Server):
         self.assertEqual(self.call("/internal/my-issues", "DELETE")[0], HTTPStatus.METHOD_NOT_ALLOWED)
 
 
+class HealthTests(_Server):
+    def test_healthz_needs_no_bearer_and_names_the_running_version(self):
+        from mcp_governance_gateway import __version__
+        status, payload = self.call("/healthz", token=None)
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(payload["version"], __version__)
+        self.assertTrue(payload["ok"])
+
+
 class AuthenticationTests(_Server):
     def test_no_bearer_is_unauthorized(self):
         status, payload = self.call("/internal/credentials", token=None)
