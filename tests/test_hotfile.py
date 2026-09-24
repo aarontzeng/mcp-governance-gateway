@@ -3,8 +3,6 @@ used to each carry a copy of -- with five different answers to what a corrupt
 file meant."""
 from __future__ import annotations
 
-import contextlib
-import io
 import json
 import os
 import stat
@@ -63,12 +61,12 @@ class ReloadingFileTests(unittest.TestCase):
         store.refresh()
         self.path.write_text("{ nope", encoding="utf-8")
         _bump(self.path)
-        with contextlib.redirect_stderr(io.StringIO()) as err:
+        with self.assertLogs("mcp_governance_gateway.hotfile", level="WARNING") as logs:
             self.assertEqual(store.current, {"v": 1})
             self.assertEqual(store.current, {"v": 1})
         self.assertTrue(store.stale)
-        self.assertIn("value reload failed; keeping the last-good copy", err.getvalue())
-        self.assertEqual(err.getvalue().count("reload failed"), 1, "complaints are throttled")
+        self.assertIn("value reload failed; keeping the last-good copy", logs.output[0])
+        self.assertEqual(len(logs.output), 1, "complaints are throttled")
         self.assertEqual(self.parses, 2, "a recorded failure is not retried until the file changes")
         self.path.write_text(json.dumps({"v": 3}), encoding="utf-8")
         _bump(self.path)
@@ -82,7 +80,7 @@ class ReloadingFileTests(unittest.TestCase):
         store.refresh()
         self.path.write_text("{ nope", encoding="utf-8")
         _bump(self.path)
-        with contextlib.redirect_stderr(io.StringIO()):
+        with self.assertLogs("mcp_governance_gateway.hotfile", level="WARNING"):
             store.refresh()
             store.refresh()
         self.assertEqual(self.parses, 3)
@@ -131,7 +129,7 @@ class ReloadingFileTests(unittest.TestCase):
             return json.loads(missing.read_text(encoding="utf-8"))
 
         store: ReloadingFile[dict] = ReloadingFile(missing, parse, what="late", initial={})
-        with contextlib.redirect_stderr(io.StringIO()):
+        with self.assertLogs("mcp_governance_gateway.hotfile", level="WARNING"):
             self.assertEqual(store.current, {})   # missing: parse failed, last-good kept
         self.assertEqual(file_signature(missing), (None, None, None))
         missing.write_text(json.dumps({"here": True}), encoding="utf-8")

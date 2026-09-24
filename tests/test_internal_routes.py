@@ -136,11 +136,13 @@ class RoutingTests(_Server):
         self.assertEqual(payload, {"hasKey": False, "issues": []})
 
     def test_an_unknown_path_under_internal_is_not_routed_here(self):
-        # 405 rather than 404 is the handler's pre-existing answer for every
-        # unrouted GET, not something this surface chose; asserted so a change
-        # to that fall-through shows up as a test rather than as a surprise.
-        self.assertEqual(self.call("/internal/whatever")[0], HTTPStatus.METHOD_NOT_ALLOWED)
+        # An unrouted path is 404 whatever the method; 405 is reserved for a path
+        # the listener does serve, asked for with a method it does not (GET /mcp).
+        # Until the route table this was 405 for every unrouted GET, an accident
+        # of the fall-through that this test used to pin.
+        self.assertEqual(self.call("/internal/whatever")[0], HTTPStatus.NOT_FOUND)
         self.assertEqual(self.call("/internal/whatever", "POST", body={})[0], HTTPStatus.NOT_FOUND)
+        self.assertEqual(self.call("/internal/my-issues", "DELETE")[0], HTTPStatus.METHOD_NOT_ALLOWED)
 
 
 class AuthenticationTests(_Server):

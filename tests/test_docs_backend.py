@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import contextlib
-import io
 import json
 import os
 import subprocess
@@ -375,11 +373,11 @@ class SpecKeyedSnapshotTests(unittest.TestCase):
 
         self.corpus._git = flaky
         self.corpus._snapshots["p"].refreshed_at -= 7200  # force a refresh attempt
-        with contextlib.redirect_stderr(io.StringIO()) as err:
+        with self.assertLogs("mcp_governance_gateway", level="WARNING") as logs:
             self.assertEqual(self.corpus.get("wiki/x.md", _ctx("p"))["text"], "# First")
         # The reader cannot tell it was served stale content; the operator must.
-        self.assertIn("last good snapshot", err.getvalue())
-        self.assertIn("'p'", err.getvalue())
+        self.assertIn("last good snapshot", "\n".join(logs.output))
+        self.assertIn("'p'", "\n".join(logs.output))
 
     def test_a_project_removed_mid_refresh_does_not_raise_keyerror(self):
         # The refresh reads its specification from a captured value, so a reload that
@@ -528,9 +526,9 @@ class ReposHotReloadTests(unittest.TestCase):
     def test_a_corrupt_write_keeps_the_last_good_map(self):
         # A bad save must not take every project's docs tools down.
         self.repos_file.write_text("{ this is not json", encoding="utf-8")
-        with contextlib.redirect_stderr(io.StringIO()) as err:
+        with self.assertLogs("mcp_governance_gateway", level="WARNING") as logs:
             self.assertTrue(self.corpus.has_project("p"))
-        self.assertIn("docs repos file reload failed", err.getvalue())  # but not silently
+        self.assertIn("docs repos file reload failed", "\n".join(logs.output))  # but not silently
 
     def test_a_changed_url_retargets_the_existing_clone(self):
         # Hot-reloading the map is not enough on its own: the clone on disk still has
@@ -847,13 +845,13 @@ class TreeReadTests(unittest.TestCase):
             return original(cwd, *args, **kwargs)
 
         corpus._git = fail
-        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(DocsBackendError) as cm:
+        with self.assertLogs("mcp_governance_gateway", level="ERROR") as logs, self.assertRaises(DocsBackendError) as cm:
             corpus.list(_ctx("p"))
         self.assertEqual(cm.exception.status, 503)
         self.assertNotIn(sentinel, str(cm.exception))
         self.assertNotIn("internal-host", str(cm.exception))
         self.assertIn("docs corpus unavailable", str(cm.exception))
-        self.assertIn(sentinel, err.getvalue())   # the operator still sees why
+        self.assertIn(sentinel, "\n".join(logs.output))   # the operator still sees why
 
     def test_content_with_multibyte_text_survives_the_batch_read(self):
         _write_files(self.work, {"wiki/cjk.md": "# 中文標題\n\n內容 — with dash\n"})

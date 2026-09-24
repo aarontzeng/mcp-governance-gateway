@@ -28,8 +28,8 @@ one read it with no lock at all. The policy lives here now, once:
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sys
 import tempfile
 import threading
 import time
@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
+log = logging.getLogger(__name__)
 
 _UNSET = object()   # can never equal a real signature, so the first access reloads
 
@@ -143,7 +144,7 @@ class ReloadingFile(Generic[T]):
                 now = time.monotonic()
                 if now - self._last_complaint > self._COMPLAIN_EVERY_SEC:
                     self._last_complaint = now
-                    print(f"{self._failure_message}: {exc}", file=sys.stderr, flush=True)
+                    log.warning("%s: %s", self._failure_message, exc)
                 return
             self._value = value
             self._sig = signature

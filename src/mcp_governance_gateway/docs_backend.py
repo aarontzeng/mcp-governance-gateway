@@ -18,12 +18,12 @@ from __future__ import annotations
 import builtins
 import hashlib
 import json
+import logging
 import math
 import os
 import posixpath
 import re
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -35,6 +35,8 @@ from .errors import BackendError
 from .hotfile import ReloadingFile
 from .memory_backend import ActorLabels, RequestContext, _display_actor
 from .review_backend import ReviewSpec, parse_review_spec
+
+log = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 _PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")  # no leading dot: not ".", "..", ".git"
@@ -406,11 +408,8 @@ class DocsCorpus:
                     # snapshot is a freshness compromise the reader can live with --
                     # said on the operator's log, since the reader cannot tell, and
                     # a repository that keeps failing should not stay quiet.
-                    print(
-                        f"docs corpus refresh failed for project {spec.project!r}; "
-                        "serving the last good snapshot until the next pull interval",
-                        file=sys.stderr, flush=True,
-                    )
+                    log.warning("docs corpus refresh failed for project %r; serving the last good "
+                                "snapshot until the next pull interval", spec.project)
                     stale.refreshed_at = time.monotonic()
                     return stale
                 # A different specification, though, means the old snapshot is another
@@ -421,11 +420,8 @@ class DocsCorpus:
                 # log, never into the tool error the client reads.
                 stderr = exc.stderr if isinstance(exc.stderr, bytes) else b""
                 timed_out = isinstance(exc, subprocess.TimeoutExpired)
-                print(
-                    f"docs corpus refresh failed for project {spec.project!r}: "
-                    + ("git timed out" if timed_out else stderr.decode(errors="replace").strip()[:500]),
-                    file=sys.stderr, flush=True,
-                )
+                log.error("docs corpus refresh failed for project %r: %s", spec.project,
+                          "git timed out" if timed_out else stderr.decode(errors="replace").strip()[:500])
                 detail = "git timed out" if timed_out else "git clone/fetch failed"
                 raise DocsBackendError(f"docs corpus unavailable: {detail}", status=503) from exc
             # Resolved before taking the snapshot lock, so no lock is ever held while

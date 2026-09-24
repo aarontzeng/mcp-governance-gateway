@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
-import sys
 import threading
 from datetime import UTC, datetime
 from enum import Enum
@@ -12,13 +12,16 @@ from typing import Any
 
 from .hotfile import ReloadingFile, atomic_write_json
 
+log = logging.getLogger(__name__)
+
 # cryptography is a runtime dependency; the import is guarded so the enum stays
 # importable without it, and `degraded` then reports the store as unusable.
-AESGCM: Any
+AESGCM: Any = None
 try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _aesgcm
+    AESGCM = _aesgcm
 except Exception:  # pragma: no cover - only hit when cryptography is absent
-    AESGCM = None
+    pass
 
 
 class KeyState(Enum):
@@ -62,12 +65,8 @@ def load_master_keys(path: str | Path) -> tuple[str | None, dict[str, bytes]]:
     try:
         mode = p.stat().st_mode
         if mode & 0o077:  # group/other can read this — the master key is the crown jewel
-            print(
-                f"WARNING: credential store master key {path} is group/other-accessible "
-                f"(mode {oct(mode & 0o777)}); it should be 0400.",
-                file=sys.stderr,
-                flush=True,
-            )
+            log.warning("credential store master key %s is group/other-accessible (mode %s); it should be 0400.",
+                        path, oct(mode & 0o777))
     except OSError:
         pass
     try:

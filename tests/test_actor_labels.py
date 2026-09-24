@@ -73,8 +73,6 @@ class ActorLabelsFileTests(unittest.TestCase):
         # `except Exception: pass` kept last-good and said nothing, and a failed
         # parse was recorded as seen, so a store that stopped parsing was
         # invisible until the next edit.
-        import contextlib
-        import io
         import os
         import time
         d = tempfile.mkdtemp()
@@ -84,9 +82,9 @@ class ActorLabelsFileTests(unittest.TestCase):
         self.assertEqual(al.get()["10000001"], "alice@example.com")
         p.write_text("{ nope")
         os.utime(p, (time.time() + 5, time.time() + 5))
-        with contextlib.redirect_stderr(io.StringIO()) as err:
+        with self.assertLogs("mcp_governance_gateway", level="WARNING") as logs:
             self.assertEqual(al.get()["10000001"], "alice@example.com")
-        self.assertIn("actor labels reload failed", err.getvalue())
+        self.assertIn("actor labels reload failed", "\n".join(logs.output))
 
     def test_stored_name_wins_over_email(self):
         d = tempfile.mkdtemp()

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import base64
-import contextlib
-import io
 import json
 import os
 import tempfile
@@ -122,11 +120,11 @@ class RedmineKeyStoreTests(unittest.TestCase):
         self.path.write_text("{ not valid json", encoding="utf-8")
         future = os.stat(self.path).st_mtime + 5
         os.utime(self.path, (future, future))
-        with contextlib.redirect_stderr(io.StringIO()) as err:
+        with self.assertLogs("mcp_governance_gateway", level="WARNING") as logs:
             state, key = ks.get(_ACTOR)
         self.assertEqual((state, key), (KeyState.OK, "secretkey"))
-        self.assertIn("credential store reload failed", err.getvalue())
-        self.assertNotIn("secretkey", err.getvalue())
+        self.assertIn("credential store reload failed", "\n".join(logs.output))
+        self.assertNotIn("secretkey", "\n".join(logs.output))
 
     def test_nonce_unique_for_same_plaintext(self):
         ks = self.store()

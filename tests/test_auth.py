@@ -1,7 +1,6 @@
 """Bearer tokens: the token file and its hot reload, signed identity propagation, and the issue_project claim's compatibility name."""
 from __future__ import annotations
 
-import io
 import json
 import os
 import tempfile
@@ -209,11 +208,11 @@ class MultiFileTokenReloadTests(unittest.TestCase):
             self._bump_mtime(user)
             # corrupt reload keeps last-good map; both tokens still authenticate --
             # and says so on stderr, because a revoke in that file did NOT land.
-            with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            with self.assertLogs("mcp_governance_gateway", level="WARNING") as logs:
                 self.assertEqual(auth.authenticate_header("Bearer usr").actor, "a@x")
             self.assertEqual(auth.authenticate_header("Bearer svc").project, "x")
-            self.assertIn("token file reload failed", err.getvalue())
-            self.assertIn("last-good", err.getvalue())
+            self.assertIn("token file reload failed", "\n".join(logs.output))
+            self.assertIn("last-good", "\n".join(logs.output))
 
     def test_the_shipped_example_token_file_parses(self) -> None:
         # config/examples/tokens.example.json is what .env.example points people at;

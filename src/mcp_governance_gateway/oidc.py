@@ -32,9 +32,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import math
 import re
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -50,6 +50,8 @@ from cryptography.hazmat.primitives.asymmetric import utils as asym_utils
 
 from .auth import AuthError, Principal
 from .hotfile import ReloadingFile
+
+log = logging.getLogger(__name__)
 
 # A signed JWS this gateway will verify, mapped to (hash, kind). Anything absent
 # from this table is refused by name before a key is looked up -- see the module
@@ -212,8 +214,7 @@ class JwksCache:
             except Exception as exc:  # noqa: BLE001 - any failure keeps last-good
                 # Loud, and non-fatal: a rotation we could not fetch fails the
                 # requests using the new kid, not every request.
-                print(f"OIDC key set fetch failed; keeping the last-good keys: {exc}",
-                      file=sys.stderr, flush=True)
+                log.warning("OIDC key set fetch failed; keeping the last-good keys: %s", exc)
             else:
                 with self._lock:
                     self._keys = keys
