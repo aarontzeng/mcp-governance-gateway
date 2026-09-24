@@ -26,6 +26,7 @@ from typing import Any, Iterator
 from urllib import error, parse, request
 
 from .errors import BackendError
+from .http_client import JsonHttpClient
 from .memory_backend import RequestContext
 
 
@@ -257,6 +258,11 @@ class JenkinsHttpBackend:
             self._auth = "Basic " + base64.b64encode(f"{user}:{token}".encode()).decode()
         self._jobs = jobs_by_project
         self._timeout_sec = timeout_sec
+        # JSON and text replies; artifact streams and the trigger POST keep their
+        # own urlopen because they read headers and bodies the client does not.
+        self._http = JsonHttpClient(self._base_url, error_cls=CiBackendError, label="CI",
+                                    timeout_sec=timeout_sec, max_bytes=_MAX_LOG_FETCH_BYTES,
+                                    headers=self._headers())
         # Public base for the download endpoint ci.artifact hands back. Unset leaves a
         # relative reference the caller prepends its own origin to.
         self._artifact_base = (artifact_base_url or "").rstrip("/")
@@ -607,30 +613,13 @@ class JenkinsHttpBackend:
         return {"job": name, **row}
 
     def _request_json(self, path: str) -> dict[str, Any]:
-        raw = self._fetch(path)
-        if not raw.strip():
-            return {}   # an empty body is "nothing there", not invalid JSON
-        try:
-            decoded = json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise CiBackendError("CI returned invalid JSON") from exc
+        decoded = self._http.decode(self._fetch(path))
         return decoded if isinstance(decoded, dict) else {}
 
-    def _request_text(self, path: str) -> str:
-        return self._fetch(path).decode("utf-8", errors="replace")
-
     def _fetch(self, path: str) -> bytes:
-        req = request.Request(self._base_url + path, headers=self._headers(), method="GET")
-        try:
-            with request.urlopen(req, timeout=self._timeout_sec) as response:
-                return response.read(_MAX_LOG_FETCH_BYTES)
-        except error.HTTPError as exc:
-            raise CiBackendError(f"CI HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            # A garbled status line or an over-long header is an HTTPException, not
-            # an OSError, and a credential or redirect the request cannot be encoded
-            # with is a ValueError; either way the CI is unusable, not the caller.
-            raise CiBackendError("CI unavailable") from exc
+        # A reply past the cap is refused, where it used to be cut mid-JSON and
+        # surface as "invalid JSON", which sent an operator looking at the wrong thing.
+        return self._http.fetch("GET", path)
 
     def _headers(self) -> dict[str, str]:
         # identity: an artifact is streamed as the bytes the build wrote, and the

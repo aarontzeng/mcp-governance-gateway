@@ -7,8 +7,9 @@ import json
 import os
 from pathlib import Path
 import sys
-import tempfile
 import threading
+
+from .hotfile import ReloadingFile, atomic_write_json
 
 try:  # cryptography is a runtime dependency; guard the import so the enum stays importable
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -28,7 +29,6 @@ class KeyStoreError(Exception):
 
 
 _NONCE_BYTES = 12
-_UNSET = object()
 
 
 def _b64e(raw: bytes) -> str:
@@ -120,10 +120,23 @@ class CredentialStore:
         self._path = Path(store_path)
         self._active_key_id = active_key_id
         self._master_keys = dict(master_keys or {})
-        self._lock = threading.Lock()
-        self._records: dict[str, dict] = {}
-        self._sig: object = _UNSET
-        self._reload()
+        self._lock = threading.Lock()   # serializes writers; readers take none
+        # A corrupt or partial file keeps the last-good records and says so,
+        # because a revoke written into that file has not taken effect
+        # (hotfile.ReloadingFile). An absent file is an empty store: everyone
+        # MISSING, which is the state before the first enrollment.
+        self._store: ReloadingFile[dict[str, dict]] = ReloadingFile(
+            self._path,
+            lambda previous: self._read_records(),
+            what="credential store",
+            initial={},
+            failure_message="credential store reload failed; keeping the last-good records",
+        )
+        self._store.refresh()   # so a corrupt store complains at boot, not at first use
+
+    @property
+    def _records(self) -> dict[str, dict]:
+        return self._store.value
 
     @property
     def degraded(self) -> bool:
@@ -133,28 +146,17 @@ class CredentialStore:
 
     # --- read path -------------------------------------------------------
 
-    def _current_sig(self) -> tuple | None:
+    def _read_records(self) -> dict[str, dict]:
         try:
-            st = self._path.stat()
-        except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size, st.st_ino)
+            text = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}   # absent file -> empty store (everyone MISSING)
+        data = json.loads(text)
+        recs = data.get("keys") if isinstance(data, dict) else None
+        return recs if isinstance(recs, dict) else {}
 
     def _reload(self) -> None:
-        sig = self._current_sig()
-        if sig == self._sig:
-            return
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            recs = data.get("keys") if isinstance(data, dict) else None
-            self._records = recs if isinstance(recs, dict) else {}
-        except OSError:
-            self._records = {}  # absent file -> empty store (everyone MISSING)
-        except Exception as exc:
-            # keep last-good on a corrupt/partial file; retry on next change -- and say
-            # so, because a revoke written into that file has not taken effect.
-            print(f"credential store reload failed; keeping the last-good records: {exc}", file=sys.stderr, flush=True)
-        self._sig = sig
+        self._store.refresh()
 
     @staticmethod
     def _is_legacy_flat(raw: dict) -> bool:
@@ -301,30 +303,13 @@ class CredentialStore:
             return True
 
     def _atomic_write(self, records: dict[str, dict]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(self._path.parent), prefix=".rk-", suffix=".tmp")
-        try:
-            # 0600, before any bytes, so the ciphertext is never briefly readable
-            # by anyone else. It was 0640, which this class's own docstring argues
-            # against: a single UID reads and writes this file, so there is no
-            # group that needs it, and `os.replace` means an upgrade tightens an
-            # existing store on its next write. The token store `mcpgw-admin`
-            # writes has always been 0600; these two hold the same class of
-            # secret and should not differ.
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w") as f:
-                json.dump({"keys": records}, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self._path)  # atomic; new inode -> reload detects it
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        self._records = records
-        self._sig = self._current_sig()
+        # 0600, before any bytes, so the ciphertext is never briefly readable by
+        # anyone else: a single UID reads and writes this file, so there is no
+        # group that needs it, and `os.replace` means an upgrade tightens an
+        # existing store on its next write. Same writer as the token store
+        # `mcpgw-admin` writes; these two hold the same class of secret.
+        atomic_write_json(self._path, {"keys": records})
+        self._store.publish(records)   # our own write is not a change to re-read
 
 
 # Importers written against the old class name.

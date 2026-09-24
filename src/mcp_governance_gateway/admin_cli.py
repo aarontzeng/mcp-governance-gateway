@@ -35,9 +35,10 @@ import json
 import os
 import secrets
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
+
+from .hotfile import atomic_write_json
 
 _TOKEN_BYTES = 32
 
@@ -61,26 +62,9 @@ def _load(path: Path) -> list[dict[str, Any]]:
 
 
 def _save(path: Path, entries: list[dict[str, Any]]) -> None:
-    """Atomic, 0600, fsynced — the write ADR-0007 asks a minter for.
-
-    The temp file is created in the SAME directory so `os.replace` is a rename
-    within one filesystem; across filesystems it is not atomic. Permissions are
-    set before the bytes, not after, so the token is never briefly world-readable.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump({"tokens": entries}, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        tmp = ""
-    finally:
-        if tmp:
-            os.unlink(tmp)
+    """Atomic, 0600, fsynced — the write ADR-0007 asks a minter for, and the
+    same one the credential store uses (hotfile.atomic_write_json)."""
+    atomic_write_json(path, {"tokens": entries})
 
 
 def _match(entry: dict[str, Any], actor: str, project: str) -> bool:

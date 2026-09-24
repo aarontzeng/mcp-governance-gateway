@@ -31,6 +31,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .errors import BackendError
+from .hotfile import ReloadingFile
 from .memory_backend import ActorLabels, RequestContext, _display_actor
 from .review_backend import ReviewSpec, parse_review_spec
 
@@ -160,12 +161,12 @@ class _Spec:
 class _Registry:
     """An immutable (generation, mapping) pair, published as one object.
 
-    Rebinding a dict left two pieces of dependent state -- the map and its file
-    signature -- with no version relation between them, so a reader could act on a
-    map while a snapshot keyed to the previous one still looked fresh."""
+    Rebinding a dict left two pieces of dependent state -- the map and the
+    generation a snapshot was keyed to -- with no version relation between
+    them, so a reader could act on a map while a snapshot keyed to the previous
+    one still looked fresh."""
     generation: int
     repos: dict[str, dict[str, Any]]
-    signature: tuple
 
 
 @dataclass
@@ -215,54 +216,32 @@ class DocsCorpus:
         # happens on the way out.
         self._actor_labels = actor_labels
         # When set, a project added or edited in this file takes effect without a
-        # restart -- same mtime/size/inode signature as the token store's hot
-        # reload, for the same reasons: st_mtime alone can miss two same-second
-        # writes on a coarse-mtime filesystem, and an atomic write swaps in a new
-        # inode every time.
+        # restart. A corrupt write keeps the last-good map, so a bad save can
+        # never take every project's docs tools down (hotfile.ReloadingFile).
+        # The caller read the file before constructing us, and the store
+        # deliberately does not stamp that read's signature: the first lookup
+        # reloads once, so an edit landing in between is picked up rather than
+        # recorded as already seen.
         self._repos_file = repos_file
-        # Signature deliberately EMPTY rather than stat'd here. The caller read
-        # the file before constructing us, so stamping it now would pair the
-        # content read THEN with the signature as of NOW: an edit landing in
-        # that window would be recorded as already-seen and never picked up --
-        # not late, never, since `_current_registry` returns early on a matching
-        # signature. An empty tuple can never equal a real stat, so the first
-        # lookup reloads once and publishes the true signature.
-        self._registry = _Registry(generation=0, repos=dict(repos), signature=())
+        self._registry_store: ReloadingFile[_Registry] = ReloadingFile(
+            repos_file or None,
+            self._parse_registry,
+            what="docs repos file",
+            initial=_Registry(generation=0, repos=dict(repos)),
+            failure_message="docs repos file reload failed; keeping the last-good map",
+        )
 
-    def _repos_file_sig(self) -> tuple:
-        if not self._repos_file:
-            return ()
-        try:
-            st = os.stat(self._repos_file)
-            return (st.st_mtime_ns, st.st_size, st.st_ino)
-        except OSError:
-            return (None, None, None)
+    def _parse_registry(self, previous: _Registry) -> _Registry:
+        assert self._repos_file is not None
+        return _Registry(previous.generation + 1, load_docs_repos(self._repos_file))
 
     def _current_registry(self) -> _Registry:
         """The registry, reloading first when the file changed.
 
         Publication is one assignment of one immutable object, so a reader either
         sees the whole old registry or the whole new one -- generation included.
-        The lock is held only for the file read, never over any Git work."""
-        if not self._repos_file:
-            return self._registry
-        signature = self._repos_file_sig()
-        if signature == self._registry.signature:
-            return self._registry
-        with self._registry_lock:
-            if signature == self._registry.signature:  # another thread published it
-                return self._registry
-            try:
-                repos = load_docs_repos(self._repos_file)
-            except Exception as exc:
-                # Keep the last-good map on a missing/partial/corrupt write, so a bad
-                # save can never take every project's docs tools down. The signature
-                # advances regardless, so a failed parse is not retried on every call.
-                print(f"docs repos file reload failed; keeping the last-good map: {exc}", file=sys.stderr, flush=True)
-                self._registry = _Registry(self._registry.generation, self._registry.repos, signature)
-                return self._registry
-            self._registry = _Registry(self._registry.generation + 1, repos, signature)
-            return self._registry
+        No lock is held over any Git work."""
+        return self._registry_store.current
 
     def _resolve_spec(self, project: str | None) -> _Spec:
         """Capture this project's specification once, from one registry publication."""

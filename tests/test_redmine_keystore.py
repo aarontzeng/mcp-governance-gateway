@@ -253,14 +253,14 @@ class VerifyKeyHeaderTests(unittest.TestCase):
             captured["headers"] = {k.lower(): v for k, v in req.header_items()}
             return _Resp()
 
-        import mcp_governance_gateway.issue_backend as ib
+        from mcp_governance_gateway import http_client
 
-        original = ib.request.urlopen
-        ib.request.urlopen = router
+        original = http_client.request.urlopen
+        http_client.request.urlopen = router
         try:
             RedmineHttpBackend(base_url="http://redmine.internal/redmine", api_key="SVC").verify_key("SECRETKEY")
         finally:
-            ib.request.urlopen = original
+            http_client.request.urlopen = original
         self.assertNotIn("SECRETKEY", captured["url"])  # never in the URL/query (would leak to access logs)
         self.assertEqual(captured["headers"].get("x-redmine-api-key"), "SECRETKEY")
 

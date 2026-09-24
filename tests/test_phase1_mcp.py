@@ -688,10 +688,10 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 }
             )
 
-        import mcp_governance_gateway.memory_backend as memory_backend
+        from mcp_governance_gateway import http_client
 
-        original = memory_backend.request.urlopen
-        memory_backend.request.urlopen = fake_urlopen
+        original = http_client.request.urlopen
+        http_client.request.urlopen = fake_urlopen
         try:
             backend = HttpMemoryBackend(
                 base_url="http://memory.internal:3111", backend_token=None,
@@ -702,7 +702,7 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 RequestContext(actor="u", project="example-project", client="t", request_id="r"),
             )
         finally:
-            memory_backend.request.urlopen = original
+            http_client.request.urlopen = original
 
         # gateway injects the token's project; agentmemory filters server-side
         self.assertEqual(captured["body"], {"query": "tenant isolation", "limit": 10, "project": "example-project"})
@@ -727,10 +727,10 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 {"results": {"leak": {"project": "OTHER-Q"}}, "text": "AGGREGATE SECRET", "tokens_used": 9999}
             )
 
-        import mcp_governance_gateway.memory_backend as memory_backend
+        from mcp_governance_gateway import http_client
 
-        original = memory_backend.request.urlopen
-        memory_backend.request.urlopen = fake_urlopen
+        original = http_client.request.urlopen
+        http_client.request.urlopen = fake_urlopen
         try:
             backend = HttpMemoryBackend(
                 base_url="http://memory.internal:3111", backend_token=None,
@@ -740,7 +740,7 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 "q", 10, RequestContext(actor="u", project="example-project", client="t", request_id="r"),
             )
         finally:
-            memory_backend.request.urlopen = original
+            http_client.request.urlopen = original
 
         self.assertEqual(result, {"results": [], "count": 0})
 
@@ -749,10 +749,10 @@ class HttpMemoryBackendTests(unittest.TestCase):
             # backend ignores `limit` and returns more than asked
             return _FakeResponse({"results": [{"observation": {"id": f"o{i}"}} for i in range(20)]})
 
-        import mcp_governance_gateway.memory_backend as memory_backend
+        from mcp_governance_gateway import http_client
 
-        original = memory_backend.request.urlopen
-        memory_backend.request.urlopen = fake_urlopen
+        original = http_client.request.urlopen
+        http_client.request.urlopen = fake_urlopen
         try:
             backend = HttpMemoryBackend(
                 base_url="http://memory.internal:3111", backend_token=None,
@@ -762,7 +762,7 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 "q", 5, RequestContext(actor="u", project="example-project", client="t", request_id="r"),
             )
         finally:
-            memory_backend.request.urlopen = original
+            http_client.request.urlopen = original
 
         self.assertEqual(result["count"], 5)
         self.assertEqual(len(result["results"]), 5)
@@ -777,10 +777,10 @@ class HttpMemoryBackendTests(unittest.TestCase):
             captured["auth"] = req.headers.get("Authorization")
             return _FakeResponse({"success": True, "memory": {"id": "mem_1", "project": "example-project"}})
 
-        import mcp_governance_gateway.memory_backend as memory_backend
+        from mcp_governance_gateway import http_client
 
-        original = memory_backend.request.urlopen
-        memory_backend.request.urlopen = fake_urlopen
+        original = http_client.request.urlopen
+        http_client.request.urlopen = fake_urlopen
         try:
             backend = HttpMemoryBackend(
                 base_url="http://memory.internal:3111", backend_token="backend-token",
@@ -791,7 +791,7 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 RequestContext(actor="user@example.com", project="example-project", client="test", request_id="req_1"),
             )
         finally:
-            memory_backend.request.urlopen = original
+            http_client.request.urlopen = original
 
         self.assertEqual(result, {"saved": True, "project": "example-project", "id": "mem_1"})
         self.assertEqual(captured["url"], "http://memory.internal:3111/agentmemory/remember")
@@ -817,10 +817,10 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 }
             )
 
-        import mcp_governance_gateway.memory_backend as memory_backend
+        from mcp_governance_gateway import http_client
 
-        original = memory_backend.request.urlopen
-        memory_backend.request.urlopen = fake_urlopen
+        original = http_client.request.urlopen
+        http_client.request.urlopen = fake_urlopen
         try:
             backend = HttpMemoryBackend(
                 base_url="http://memory.internal:3111", backend_token=None,
@@ -831,7 +831,7 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 RequestContext(actor="u", project="example-project", client="t", request_id="r"),
             )
         finally:
-            memory_backend.request.urlopen = original
+            http_client.request.urlopen = original
 
         # backend body not echoed; and a project mismatch (memory.project != caller
         # project) means the foreign id is not surfaced
@@ -856,10 +856,10 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 }
             )
 
-        import mcp_governance_gateway.memory_backend as memory_backend
+        from mcp_governance_gateway import http_client
 
-        original = memory_backend.request.urlopen
-        memory_backend.request.urlopen = fake_urlopen
+        original = http_client.request.urlopen
+        http_client.request.urlopen = fake_urlopen
         try:
             backend = HttpMemoryBackend(
                 base_url="http://memory.internal:3111", backend_token=None,
@@ -869,7 +869,7 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 10, 0, RequestContext(actor="u", project="example-project", client="t", request_id="r"),
             )
         finally:
-            memory_backend.request.urlopen = original
+            http_client.request.urlopen = original
 
         self.assertEqual(result["total"], 2)  # OTHER-project item dropped
         self.assertEqual([m["id"] for m in result["memories"]], ["m3", "m1"])  # newest first
@@ -889,10 +889,10 @@ class HttpMemoryBackendTests(unittest.TestCase):
                 }
             )
 
-        import mcp_governance_gateway.memory_backend as memory_backend
+        from mcp_governance_gateway import http_client
 
-        original = memory_backend.request.urlopen
-        memory_backend.request.urlopen = fake_urlopen
+        original = http_client.request.urlopen
+        http_client.request.urlopen = fake_urlopen
         try:
             backend = HttpMemoryBackend(
                 base_url="http://memory.internal:3111", backend_token=None,
@@ -900,7 +900,7 @@ class HttpMemoryBackendTests(unittest.TestCase):
             )
             page = backend.list(1, 1, RequestContext(actor="u", project="p", client="t", request_id="r"))
         finally:
-            memory_backend.request.urlopen = original
+            http_client.request.urlopen = original
 
         self.assertEqual(page["total"], 3)
         self.assertEqual(page["count"], 1)
@@ -919,7 +919,7 @@ class BackendFramingErrorTests(unittest.TestCase):
     def _ctx(self) -> RequestContext:
         return RequestContext(actor="u", project="p", client="t", request_id="r", issue_project="97")
 
-    def _patched(self, module: str):
+    def _patched(self):
         import http.client
 
         class _Truncated:
@@ -933,7 +933,7 @@ class BackendFramingErrorTests(unittest.TestCase):
             def read(self, n=-1):
                 raise http.client.IncompleteRead(b"")
 
-        return mock.patch(f"mcp_governance_gateway.{module}.request.urlopen",
+        return mock.patch("mcp_governance_gateway.http_client.request.urlopen",
                           return_value=_Truncated())
 
     def _memory(self) -> HttpMemoryBackend:
@@ -949,14 +949,14 @@ class BackendFramingErrorTests(unittest.TestCase):
         for name, call in (("post", lambda: backend.search("q", 5, self._ctx())),
                            ("get", lambda: backend.lesson_list(5, self._ctx()))):
             with self.subTest(path=name):
-                with self._patched("memory_backend"):
+                with self._patched():
                     with self.assertRaises(MemoryBackendError) as cm:
                         call()
                 self.assertEqual(str(cm.exception), "memory backend unavailable")
 
     def test_a_truncated_redmine_reply_is_issue_tracker_unavailable(self) -> None:
         backend = RedmineHttpBackend(base_url="http://tracker.example", api_key="k")
-        with self._patched("issue_backend"):
+        with self._patched():
             with self.assertRaises(IssueBackendError) as cm:
                 backend.get("1", self._ctx())
         self.assertEqual(str(cm.exception), "issue tracker unavailable")
@@ -964,7 +964,7 @@ class BackendFramingErrorTests(unittest.TestCase):
     def test_a_truncated_gitlab_reply_is_issue_tracker_unavailable(self) -> None:
         from mcp_governance_gateway.gitlab_backend import GitLabHttpBackend
         backend = GitLabHttpBackend("https://gitlab.example", "TOKEN")
-        with self._patched("gitlab_backend"):
+        with self._patched():
             with self.assertRaises(IssueBackendError) as cm:
                 backend.get("1", self._ctx())
         self.assertEqual(str(cm.exception), "issue tracker unavailable")
@@ -975,7 +975,7 @@ class BackendFramingErrorTests(unittest.TestCase):
         audit = ListAuditSink()
         app = GatewayApp(memory_backend=self._memory(), audit_sink=audit)
         principal = Principal(actor="u@x", project="p", roles=("developer",), token_id="t")
-        with self._patched("memory_backend"):
+        with self._patched():
             response = app.handle_rpc(
                 {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
                  "params": {"name": "memory.search", "arguments": {"query": "q"}}},
@@ -1116,15 +1116,15 @@ class MemoryListingShapeTests(unittest.TestCase):
     """What the listing endpoints keep when the limit bites."""
 
     def _backend(self, path, payload):
-        import mcp_governance_gateway.memory_backend as memory_backend
+        from mcp_governance_gateway import http_client
 
         def fake_urlopen(req, timeout):  # type: ignore[no-untyped-def]
             self.assertIn(path, req.full_url)
             return _FakeResponse(payload)
 
-        original = memory_backend.request.urlopen
-        memory_backend.request.urlopen = fake_urlopen
-        self.addCleanup(lambda: setattr(memory_backend.request, "urlopen", original))
+        original = http_client.request.urlopen
+        http_client.request.urlopen = fake_urlopen
+        self.addCleanup(lambda: setattr(http_client.request, "urlopen", original))
         return HttpMemoryBackend(
             base_url="http://memory.internal:3111", backend_token=None,
             search_path="/agentmemory/search", save_path="/agentmemory/remember",
@@ -1855,11 +1855,11 @@ _STATUS_ROWS = {
 
 class RedmineHttpBackendTests(unittest.TestCase):
     def _backend_with(self, router):  # type: ignore[no-untyped-def]
-        import mcp_governance_gateway.issue_backend as issue_backend
+        from mcp_governance_gateway import http_client
 
-        original = issue_backend.request.urlopen
-        issue_backend.request.urlopen = router
-        self.addCleanup(lambda: setattr(issue_backend.request, "urlopen", original))
+        original = http_client.request.urlopen
+        http_client.request.urlopen = router
+        self.addCleanup(lambda: setattr(http_client.request, "urlopen", original))
         return RedmineHttpBackend(base_url="http://redmine.internal/redmine", api_key="k")
 
     @staticmethod
@@ -2082,7 +2082,7 @@ class StatusIdResolutionTests(unittest.TestCase):
     """
 
     def _backend(self, rows=_STATUS_ROWS):
-        import mcp_governance_gateway.issue_backend as issue_backend
+        from mcp_governance_gateway import http_client
 
         self.fetches: list[str] = []
         self.rows = rows
@@ -2101,9 +2101,9 @@ class StatusIdResolutionTests(unittest.TestCase):
                 return _FakeResponse({})
             raise AssertionError((method, url))
 
-        original = issue_backend.request.urlopen
-        issue_backend.request.urlopen = router
-        self.addCleanup(lambda: setattr(issue_backend.request, "urlopen", original))
+        original = http_client.request.urlopen
+        http_client.request.urlopen = router
+        self.addCleanup(lambda: setattr(http_client.request, "urlopen", original))
         return RedmineHttpBackend(base_url="http://tracker.example/redmine", api_key="k")
 
     @staticmethod
@@ -2148,9 +2148,10 @@ class StatusIdResolutionTests(unittest.TestCase):
         # Adversarial review, 2026-08-10: a cache hit never re-validated, so after an
         # admin renamed a status the old name kept resolving to the old id -- and that
         # id now means something else, so a confirmed write landed in the wrong state.
-        import mcp_governance_gateway.issue_backend as issue_backend
+        from mcp_governance_gateway import http_client
 
         clock = [1000.0]
+        import mcp_governance_gateway.issue_backend as issue_backend
         real_monotonic = issue_backend.time.monotonic
         issue_backend.time.monotonic = lambda: clock[0]  # type: ignore[assignment]
         self.addCleanup(lambda: setattr(issue_backend.time, "monotonic", real_monotonic))
@@ -2201,7 +2202,7 @@ class IssueWriteFieldTests(unittest.TestCase):
     """tracker / priority / dueDate / parentIssue / category on the Redmine backend."""
 
     def setUp(self) -> None:
-        import mcp_governance_gateway.issue_backend as issue_backend
+        from mcp_governance_gateway import http_client
 
         self.fetches: list[str] = []
         self.writes: list[dict] = []
@@ -2235,9 +2236,9 @@ class IssueWriteFieldTests(unittest.TestCase):
                 return _FakeResponse({"issue": {"id": 12, "project": {"id": 97}}})
             raise AssertionError((method, url))
 
-        original = issue_backend.request.urlopen
-        issue_backend.request.urlopen = router
-        self.addCleanup(lambda: setattr(issue_backend.request, "urlopen", original))
+        original = http_client.request.urlopen
+        http_client.request.urlopen = router
+        self.addCleanup(lambda: setattr(http_client.request, "urlopen", original))
         self.backend = RedmineHttpBackend(base_url="http://tracker.example", api_key="k")
 
     @staticmethod
@@ -2385,7 +2386,7 @@ class IssuesMineTests(unittest.TestCase):
         self.assertEqual(cm.exception.status, 409)
 
     def test_present_key_reads_on_the_personal_key(self) -> None:
-        import mcp_governance_gateway.issue_backend as issue_backend
+        from mcp_governance_gateway import http_client
 
         keys: list[str | None] = []
 
@@ -2395,9 +2396,9 @@ class IssuesMineTests(unittest.TestCase):
                 return _FakeResponse({"project": {"id": 97, "name": "Q"}})
             return _FakeResponse({"issues": [{"id": 7, "project": {"id": 97}}]})
 
-        original = issue_backend.request.urlopen
-        issue_backend.request.urlopen = router
-        self.addCleanup(lambda: setattr(issue_backend.request, "urlopen", original))
+        original = http_client.request.urlopen
+        http_client.request.urlopen = router
+        self.addCleanup(lambda: setattr(http_client.request, "urlopen", original))
         out = self._backend(lambda actor: (KeyState.OK, "PERSONAL")).mine(10, self._ctx())
         self.assertEqual(out["count"], 1)
         self.assertIn("PERSONAL", keys)          # the "me" read ran as the caller
@@ -2437,10 +2438,10 @@ class PerCallerReadKeyTests(unittest.TestCase):
         return router
 
     def _patch(self, router):
-        import mcp_governance_gateway.issue_backend as issue_backend
-        original = issue_backend.request.urlopen
-        issue_backend.request.urlopen = router
-        self.addCleanup(lambda: setattr(issue_backend.request, "urlopen", original))
+        from mcp_governance_gateway import http_client
+        original = http_client.request.urlopen
+        http_client.request.urlopen = router
+        self.addCleanup(lambda: setattr(http_client.request, "urlopen", original))
 
     def test_get_reads_on_the_callers_own_key(self) -> None:
         keys: list[str | None] = []
@@ -2500,7 +2501,7 @@ class WriteGatingReadKeyTests(unittest.TestCase):
 
     def _verify_key_for(self, op):
         """Return the key used by the GET that verifies the target, per operation."""
-        import mcp_governance_gateway.issue_backend as issue_backend
+        from mcp_governance_gateway import http_client
         seen: list[tuple[str, str | None]] = []
 
         def router(req, timeout):  # type: ignore[no-untyped-def]
@@ -2514,9 +2515,9 @@ class WriteGatingReadKeyTests(unittest.TestCase):
                 return _FakeResponse({"issue": {"id": 7, "project": {"id": 97}, "subject": "s"}})
             return _FakeResponse({"issue": {"id": 7, "project": {"id": 97}}})
 
-        original = issue_backend.request.urlopen
-        issue_backend.request.urlopen = router
-        self.addCleanup(lambda: setattr(issue_backend.request, "urlopen", original))
+        original = http_client.request.urlopen
+        http_client.request.urlopen = router
+        self.addCleanup(lambda: setattr(http_client.request, "urlopen", original))
         op(self._backend(lambda actor: (KeyState.OK, "PERSONAL")))
         # the verification GET on the issue itself, not project resolution
         return [k for url, k in seen if "/issues/7.json" in url]

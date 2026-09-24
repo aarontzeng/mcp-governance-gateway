@@ -65,6 +65,25 @@ class ActorLabelsFileTests(unittest.TestCase):
         self.assertEqual(ActorLabels(str(Path(d) / "nope.json")).get(), {})
         self.assertEqual(ActorLabels(None).get(), {})
 
+    def test_a_corrupt_store_keeps_the_last_good_labels_and_is_not_silent(self):
+        # `except Exception: pass` kept last-good and said nothing, and a failed
+        # parse was recorded as seen, so a store that stopped parsing was
+        # invisible until the next edit.
+        import contextlib
+        import io
+        import os
+        import time
+        d = tempfile.mkdtemp()
+        p = Path(d) / "user-tokens.json"
+        p.write_text(json.dumps({"tokens": [{"actor": "10000001", "email": "alice@example.com", "token": "t"}]}))
+        al = ActorLabels(str(p))
+        self.assertEqual(al.get()["10000001"], "alice@example.com")
+        p.write_text("{ nope")
+        os.utime(p, (time.time() + 5, time.time() + 5))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(al.get()["10000001"], "alice@example.com")
+        self.assertIn("actor labels reload failed", err.getvalue())
+
     def test_stored_name_wins_over_email(self):
         d = tempfile.mkdtemp()
         p = Path(d) / "user-tokens.json"

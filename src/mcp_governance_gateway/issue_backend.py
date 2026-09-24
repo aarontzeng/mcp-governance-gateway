@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import http.client
-import json
 import re
 import time
 from datetime import date
 from typing import Any, Callable
-from urllib import error, parse, request
 
 from .memory_backend import RequestContext
 from .errors import BackendError
+from .http_client import JsonHttpClient
 from .redmine_keystore import KeyState
 
 
@@ -43,7 +41,6 @@ _ENUM_SOURCES: dict[str, tuple[str, str]] = {
 
 _DUE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-_MAX_RESPONSE_BYTES = 2_000_000
 
 
 def _iso_date(value: Any, field: str) -> str:
@@ -143,6 +140,8 @@ class RedmineHttpBackend(IssueBackend):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key  # shared/service key: non-authorship reads + fallback
         self._timeout_sec = timeout_sec
+        self._http = JsonHttpClient(self._base_url, error_cls=IssueBackendError, label="issue tracker",
+                                    timeout_sec=timeout_sec)
         self._project_id_cache: dict[str, int] = {}
         self._portal_url = (credential_portal_url or "").rstrip("/") or None
         self._enum_ids: dict[str, dict[str, int]] = {}  # _ENUM_SOURCES kind -> resolved map
@@ -635,44 +634,13 @@ class RedmineHttpBackend(IssueBackend):
         body: dict[str, Any] | None = None,
         api_key: str | None = None,
     ) -> dict[str, Any]:
-        url = parse.urljoin(self._base_url + "/", path.lstrip("/"))
-        if params:
-            url = f"{url}?{parse.urlencode(params)}"
-        headers = {"Accept": "application/json"}
         # Explicit api_key routes authorship writes / me-reads through the caller's
         # personal key; the default (None) uses the shared service key for everything
         # non-authorship (project resolve, issue-in-project verify, general reads).
         key = api_key if api_key is not None else self._api_key
-        if key:
-            headers["X-Redmine-API-Key"] = key
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-
-        req = request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with request.urlopen(req, timeout=self._timeout_sec) as response:
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
-        except error.HTTPError as exc:
-            raise IssueBackendError(f"issue tracker HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            # A garbled or truncated reply is an HTTPException, not an OSError, and
-            # a credential or redirect the request cannot be encoded with is a
-            # ValueError; either way the backend is unusable, not the caller.
-            raise IssueBackendError("issue tracker unavailable") from exc
-
-        if len(raw) > _MAX_RESPONSE_BYTES:
-            raise IssueBackendError("issue tracker response too large")
-        if not raw:
-            return {}
-        try:
-            decoded = json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise IssueBackendError("issue tracker returned invalid JSON") from exc
-        if not isinstance(decoded, dict):
-            return {}
-        return decoded
+        headers = {"X-Redmine-API-Key": key} if key else None
+        decoded = self._http.request(method, path, params=params, body=body, headers=headers)
+        return decoded if isinstance(decoded, dict) else {}
 
 
 def _issue_path(value: Any) -> str:

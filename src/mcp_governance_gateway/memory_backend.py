@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import http.client
 import json
 from pathlib import Path
 from typing import Any
-from urllib import error, parse, request
 
 from .auth import Principal
 from .errors import BackendError
+from .hotfile import ReloadingFile
+from .http_client import JsonHttpClient
 
-_MAX_RESPONSE_BYTES = 2_000_000
 # Upper bound on list fetches before gateway filtering and pagination.
 _LIST_FETCH_MAX = 5_000
 
@@ -86,42 +85,41 @@ class ActorLabels:
 
     def __init__(self, token_file: str | None) -> None:
         self._path = Path(token_file) if token_file else None
-        self._map: dict[str, str] = {}
-        self._sig: tuple | None = None
+        # Last-good on a missing or corrupt file, like every other hot-reloaded
+        # file -- and no longer silently: a store that stops parsing is worth a
+        # line on stderr even when all it costs is a label.
+        self._store: ReloadingFile[dict[str, str]] = ReloadingFile(
+            self._path,
+            lambda previous: self._parse(),
+            what="actor labels",
+            initial={},
+            failure_message="actor labels reload failed; keeping the last-good labels",
+        )
+
+    def _parse(self) -> dict[str, str]:
+        assert self._path is not None
+        data = json.loads(self._path.read_text(encoding="utf-8"))
+        out: dict[str, str] = {}
+        for t in data.get("tokens", []):
+            if not isinstance(t, dict):
+                continue
+            actor, email, name = t.get("actor"), t.get("email"), t.get("name")
+            # Prefer a stored display name over the email; _display_actor
+            # strips the domain off an email, which is a worse label than a
+            # real name when the store has one.
+            label = name if isinstance(name, str) and name.strip() else email
+            if isinstance(actor, str) and isinstance(label, str) and actor and label and actor not in out:
+                out[actor] = label
+                # Key by email as well: records written before a deployment
+                # re-keyed actors to an immutable id carry the raw email as
+                # their actor, and without this the same person shows up as
+                # two contributors either side of that migration.
+                if isinstance(email, str) and email and email not in out:
+                    out[email] = label
+        return out
 
     def get(self) -> dict[str, str]:
-        if self._path is None:
-            return self._map
-        try:
-            st = self._path.stat()
-            sig = (st.st_mtime_ns, st.st_size, st.st_ino)
-        except OSError:
-            return self._map
-        if sig != self._sig:
-            try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-                out: dict[str, str] = {}
-                for t in data.get("tokens", []):
-                    if not isinstance(t, dict):
-                        continue
-                    actor, email, name = t.get("actor"), t.get("email"), t.get("name")
-                    # Prefer a stored display name over the email; _display_actor
-                    # strips the domain off an email, which is a worse label than a
-                    # real name when the store has one.
-                    label = name if isinstance(name, str) and name.strip() else email
-                    if isinstance(actor, str) and isinstance(label, str) and actor and label and actor not in out:
-                        out[actor] = label
-                        # Key by email as well: records written before a deployment
-                        # re-keyed actors to an immutable id carry the raw email as
-                        # their actor, and without this the same person shows up as
-                        # two contributors either side of that migration.
-                        if isinstance(email, str) and email and email not in out:
-                            out[email] = label
-                self._map = out
-            except Exception:
-                pass  # keep last-good on a transient read/parse error
-            self._sig = sig
-        return self._map
+        return self._store.current
 
 
 class HttpMemoryBackend(MemoryBackend):
@@ -139,6 +137,10 @@ class HttpMemoryBackend(MemoryBackend):
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._backend_token = backend_token
+        self._http = JsonHttpClient(
+            self._base_url, error_cls=MemoryBackendError, label="memory backend", timeout_sec=timeout_sec,
+            headers={"Authorization": f"Bearer {backend_token}"} if backend_token else None,
+        )
         self._search_path = _normalize_path(search_path)
         self._save_path = _normalize_path(save_path)
         self._list_path = _normalize_path(list_path)
@@ -224,28 +226,7 @@ class HttpMemoryBackend(MemoryBackend):
         return result
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        body = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if self._backend_token:
-            headers["Authorization"] = f"Bearer {self._backend_token}"
-
-        req = request.Request(
-            parse.urljoin(self._base_url + "/", path.lstrip("/")),
-            data=body,
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with request.urlopen(req, timeout=self._timeout_sec) as response:
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
-        except error.HTTPError as exc:
-            raise MemoryBackendError(f"memory backend HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            # A garbled or truncated reply is an HTTPException, not an OSError, and
-            # a credential or redirect the request cannot be encoded with is a
-            # ValueError; either way the backend is unusable, not the caller.
-            raise MemoryBackendError("memory backend unavailable") from exc
-        return _decode(raw)
+        return _decode(self._http.request("POST", path, body=payload))
 
     def list(self, limit: int, offset: int, context: RequestContext) -> dict[str, Any]:
         # The backend /memories endpoint does NOT filter by project, but each item
@@ -367,24 +348,7 @@ class HttpMemoryBackend(MemoryBackend):
         return {"updated": True, "id": action_id, "status": action.get("status")}
 
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        url = parse.urljoin(self._base_url + "/", path.lstrip("/"))
-        if params:
-            url = f"{url}?{parse.urlencode(params)}"
-        headers = {"Accept": "application/json"}
-        if self._backend_token:
-            headers["Authorization"] = f"Bearer {self._backend_token}"
-        req = request.Request(url, headers=headers, method="GET")
-        try:
-            with request.urlopen(req, timeout=self._timeout_sec) as response:
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
-        except error.HTTPError as exc:
-            raise MemoryBackendError(f"memory backend HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            # A garbled or truncated reply is an HTTPException, not an OSError, and
-            # a credential or redirect the request cannot be encoded with is a
-            # ValueError; either way the backend is unusable, not the caller.
-            raise MemoryBackendError("memory backend unavailable") from exc
-        return _decode(raw)
+        return _decode(self._http.request("GET", path, params=params))
 
     def _fetch_all_memories(self) -> tuple[list[dict[str, Any]], bool]:
         out: list[dict[str, Any]] = []
@@ -405,15 +369,9 @@ class HttpMemoryBackend(MemoryBackend):
         return out[:_LIST_FETCH_MAX], True
 
 
-def _decode(raw: bytes) -> dict[str, Any]:
-    if len(raw) > _MAX_RESPONSE_BYTES:
-        raise MemoryBackendError("memory backend response too large")
-    if not raw:
-        return {}
-    try:
-        decoded = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise MemoryBackendError("memory backend returned invalid JSON") from exc
+def _decode(decoded: Any) -> dict[str, Any]:
+    """A list-shaped reply is wrapped rather than refused: the backend answers
+    some listings with a bare array."""
     if not isinstance(decoded, dict):
         return {"items": decoded}
     return decoded

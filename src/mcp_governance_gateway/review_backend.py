@@ -44,16 +44,14 @@ propose" a statement about a human being accountable for the proposal.
 from __future__ import annotations
 
 import base64
-import http.client
-import json
 import re
 import secrets
 from dataclasses import dataclass
 from typing import Any, Protocol
-from urllib import error, parse, request
+from urllib import parse
 
 from .errors import BackendError
-from .issue_backend import _MAX_RESPONSE_BYTES
+from .http_client import JsonHttpClient
 from .memory_backend import RequestContext
 
 # The attribution footer, in the shape `issue_backend` already stamps on notes.
@@ -259,36 +257,14 @@ class GitHubReviewBackend:
         credential: str,
         body: dict[str, Any] | None = None,
     ) -> Any:
-        url = f"{spec.api.rstrip('/')}{path}"
         credential = _require_usable_credential(credential)
-        headers = {
+        client = JsonHttpClient(spec.api, error_cls=ReviewBackendError, label="review host",
+                                timeout_sec=self._timeout_sec)
+        return client.request(method, path, body=body, headers={
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {credential}",
             "X-GitHub-Api-Version": "2022-11-28",
-        }
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with request.urlopen(req, timeout=self._timeout_sec) as response:
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
-        except error.HTTPError as exc:
-            raise ReviewBackendError(f"review host HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            # A garbled or truncated reply is an HTTPException, not an OSError, and
-            # a credential or redirect the request cannot be encoded with is a
-            # ValueError; either way the backend is unusable, not the caller.
-            raise ReviewBackendError("review host unavailable") from exc
-        if len(raw) > _MAX_RESPONSE_BYTES:
-            raise ReviewBackendError("review host response too large")
-        if not raw.strip():
-            return {}   # a 204, or a write the host acknowledges with nothing: not invalid JSON
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ReviewBackendError("review host returned invalid JSON") from exc
+        })
 
     def _propose(
         self,

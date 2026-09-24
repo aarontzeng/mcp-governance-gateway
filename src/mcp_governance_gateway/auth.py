@@ -4,10 +4,10 @@ from dataclasses import dataclass, replace
 import hashlib
 import hmac
 import json
-import sys
-import threading
 from pathlib import Path
 from typing import Any, Callable
+
+from .hotfile import ReloadingFile
 
 
 class AuthError(Exception):
@@ -42,13 +42,27 @@ class BearerTokenAuthenticator:
         token_claims: dict[str, Principal],
         sources: list[tuple[Path, bool]] | None = None,
     ) -> None:
-        self._token_claims = token_claims
         # sources: (path, required). When set, the token maps are reloaded on file
         # change so tokens minted at runtime (e.g. per-user tokens) take effect
         # without an adapter restart. Empty -> static (tests / no hot-reload).
+        # A corrupt or missing file keeps the last-good map (a bad write must
+        # never lock everyone out) and says so, loudly: a revoke written into a
+        # corrupt file has NOT taken effect. hotfile.ReloadingFile owns that
+        # policy; `_load_all` is looked up at call time because a test patches it.
         self._sources = sources or []
-        self._mtimes = self._current_mtimes()
-        self._reload_lock = threading.Lock()
+        self._store: ReloadingFile[dict[str, Principal]] = ReloadingFile(
+            [path for path, _ in self._sources],
+            lambda previous: self._load_all(self._sources),
+            what="token file",
+            initial=token_claims,
+            failure_message="token file reload failed; keeping the last-good token set",
+        )
+
+    @property
+    def _token_claims(self) -> dict[str, Principal]:
+        """The live map, WITHOUT checking the file -- for observing the state a
+        reload published rather than repairing it with another reload."""
+        return self._store.value
 
     @classmethod
     def from_file(cls, path: str | Path) -> "BearerTokenAuthenticator":
@@ -94,43 +108,8 @@ class BearerTokenAuthenticator:
             raise ValueError("no tokens loaded from any source")
         return merged
 
-    def _current_mtimes(self) -> tuple:
-        # Key on (st_mtime_ns, st_size, st_ino), not float mtime alone: os.replace swaps
-        # in a new inode on every write, so st_ino makes an atomic swap detectable even on
-        # coarse-mtime filesystems where two same-second writes share an mtime — otherwise a
-        # revoke landing in the same tick as a mint could be missed and stay authenticating.
-        out = []
-        for path, _ in self._sources:
-            try:
-                st = path.stat()
-                out.append((str(path), st.st_mtime_ns, st.st_size, st.st_ino))
-            except OSError:
-                out.append((str(path), None, None, None))
-        return tuple(out)
-
     def _maybe_reload(self) -> None:
-        if not self._sources:
-            return
-        if self._current_mtimes() == self._mtimes:
-            return
-        # Reloads are serialized, and the stat is repeated under the lock: two
-        # requests that both saw a changed file would otherwise each load it, and
-        # the one that loaded the OLDER version could publish last -- briefly
-        # re-admitting a token the newer version revoked. Reads take no lock:
-        # _load_all builds a fresh dict and we rebind (never mutate the live map in
-        # place), so a concurrent authenticate always sees a complete map.
-        with self._reload_lock:
-            current = self._current_mtimes()
-            if current == self._mtimes:
-                return
-            try:
-                self._token_claims = self._load_all(self._sources)
-            except Exception as exc:
-                # keep the last-good token map on a missing/partial/corrupt file so a bad
-                # write can never lock everyone out; retry on the next file change. Say so
-                # loudly: a revoke written into a corrupt file has NOT taken effect.
-                print(f"token file reload failed; keeping the last-good token set: {exc}", file=sys.stderr, flush=True)
-            self._mtimes = current
+        self._store.refresh()
 
     def authenticate_header(self, authorization: str | None) -> Principal:
         self._maybe_reload()

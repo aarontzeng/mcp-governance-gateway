@@ -47,6 +47,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils as asym_utils
 
 from .auth import AuthError, Principal
+from .hotfile import ReloadingFile
 
 # A signed JWS this gateway will verify, mapped to (hash, kind). Anything absent
 # from this table is refused by name before a key is looked up -- see the module
@@ -268,17 +269,22 @@ class GrantsFile:
     fail-closed direction.
     """
 
-    _COMPLAIN_EVERY_SEC = 30.0
-
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
-        self._lock = threading.Lock()
-        self._subjects: dict[str, Grant] = {}
-        self._groups: dict[str, Grant] = {}
-        self._sig: object = object()
-        self._stale = False           # last parse failed; the live map may be out of date
-        self._last_complaint = 0.0
-        self._reload(initial=True)
+        # Unreadable at boot is a boot failure (load_now); unreadable later keeps
+        # the last-good mapping -- a typo must not lock everyone out -- but this
+        # is an allow-list, so last-good is fail-OPEN: a revoked grant is still
+        # live. Hence retry_failed: the corrupt file is NOT recorded as seen, and
+        # every call retries it rather than waiting for another mtime change.
+        self._store: ReloadingFile[tuple[dict[str, Grant], dict[str, Grant]]] = ReloadingFile(
+            self._path,
+            lambda previous: self._parse(),
+            what="OIDC grants",
+            initial=({}, {}),
+            load_now=True,
+            retry_failed=True,
+            failure_message="OIDC grants reload failed; keeping the last-good grants (a removed grant is STILL LIVE)",
+        )
 
     @property
     def stale(self) -> bool:
@@ -286,14 +292,7 @@ class GrantsFile:
         therefore whatever loaded last. Surfaced on /healthz: this is an ALLOW-list,
         so keeping the last-good copy is fail-OPEN, and an operator whose offboarding
         edit did not parse needs to find that out from something other than stderr."""
-        return self._stale
-
-    def _current_sig(self) -> tuple | None:
-        try:
-            st = self._path.stat()
-        except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size, st.st_ino)
+        return self._store.stale
 
     @staticmethod
     def _grant(spec: Any) -> Grant | None:
@@ -311,42 +310,20 @@ class GrantsFile:
             roles=role_tuple,
         )
 
-    def _reload(self, initial: bool = False) -> None:
-        sig = self._current_sig()
-        if sig == self._sig:
-            return
-        with self._lock:
-            if sig == self._sig:
-                return
-            try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    raise ValueError("grants file must be a JSON object")
-                subjects, groups = {}, {}
-                for key, spec in (data.get("subjects") or {}).items():
-                    grant = self._grant(spec)
-                    if grant is not None:
-                        subjects[str(key)] = grant
-                for key, spec in (data.get("groups") or {}).items():
-                    grant = self._grant(spec)
-                    if grant is not None:
-                        groups[str(key)] = grant
-                self._subjects, self._groups = subjects, groups
-                self._stale = False
-                self._sig = sig
-            except Exception as exc:  # noqa: BLE001
-                if initial:
-                    raise
-                # Keep the last-good mapping -- a typo must not lock everyone out --
-                # but do NOT record the corrupt file as seen. This is an allow-list,
-                # so last-good is fail-OPEN: a revoked grant is still live, and the
-                # next call must retry rather than wait for another mtime change.
-                self._stale = True
-                now = time.monotonic()
-                if now - self._last_complaint > self._COMPLAIN_EVERY_SEC:
-                    self._last_complaint = now
-                    print(f"OIDC grants reload failed; keeping the last-good grants "
-                          f"(a removed grant is STILL LIVE): {exc}", file=sys.stderr, flush=True)
+    def _parse(self) -> tuple[dict[str, Grant], dict[str, Grant]]:
+        data = json.loads(self._path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("grants file must be a JSON object")
+        subjects, groups = {}, {}
+        for key, spec in (data.get("subjects") or {}).items():
+            grant = self._grant(spec)
+            if grant is not None:
+                subjects[str(key)] = grant
+        for key, spec in (data.get("groups") or {}).items():
+            grant = self._grant(spec)
+            if grant is not None:
+                groups[str(key)] = grant
+        return subjects, groups
 
     def resolve(self, subject: str, groups: tuple[str, ...]) -> Grant | None:
         """A subject's own grant, else the union of its groups' grants.
@@ -355,11 +332,11 @@ class GrantsFile:
         picking one would make a tenant boundary depend on dict ordering, and a
         person in two teams is a question for the operator, not for this code.
         """
-        self._reload()
-        direct = self._subjects.get(subject)
+        subjects, group_grants = self._store.current
+        direct = subjects.get(subject)
         if direct is not None:
             return direct
-        matched = [self._groups[g] for g in groups if g in self._groups]
+        matched = [group_grants[g] for g in groups if g in group_grants]
         if not matched:
             return None
         projects = {g.project for g in matched}

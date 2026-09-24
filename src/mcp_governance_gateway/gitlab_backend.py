@@ -21,15 +21,12 @@ Deliberate v1 boundaries (documented, not accidental):
 """
 from __future__ import annotations
 
-import http.client
-import json
 from typing import Any, Callable
-from urllib import error, parse, request
+from urllib import parse
 
 from .issue_backend import (
     IssueBackend,
     IssueBackendError,
-    _MAX_RESPONSE_BYTES,
     _d,
     _enrollment_hint,
     _normalize_status,
@@ -37,6 +34,7 @@ from .issue_backend import (
     _attribution,
 )
 from .memory_backend import RequestContext
+from .http_client import JsonHttpClient
 from .redmine_keystore import KeyState
 
 # Fields with no GitLab equivalent wired here. Refused by name on every write path:
@@ -78,6 +76,8 @@ class GitLabHttpBackend(IssueBackend):
         self._base_url = base_url.rstrip("/")
         self._token = token  # shared token: non-authorship reads + optional fallback
         self._timeout_sec = timeout_sec
+        self._http = JsonHttpClient(f"{self._base_url}/api/v4", error_cls=IssueBackendError,
+                                    label="issue tracker", timeout_sec=timeout_sec)
         self._portal_url = (credential_portal_url or "").rstrip("/") or None
         # Per-user attribution: when a resolver is wired, authorship writes route
         # through the caller's own PAT (same Decision-5 semantics as Redmine).
@@ -348,38 +348,11 @@ class GitLabHttpBackend(IssueBackend):
         body: dict[str, Any] | None = None,
         token: str | None = None,
     ) -> Any:
-        url = f"{self._base_url}/api/v4{path}"
-        if params:
-            url = f"{url}?{parse.urlencode(params)}"
-        headers = {"Accept": "application/json"}
         # Explicit token routes authorship writes / me-reads through the caller's
         # own PAT; the default uses the shared token for everything non-authorship.
         key = token if token is not None else self._token
-        if key:
-            headers["PRIVATE-TOKEN"] = key
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with request.urlopen(req, timeout=self._timeout_sec) as response:
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
-        except error.HTTPError as exc:
-            raise IssueBackendError(f"issue tracker HTTP {exc.code}", status=exc.code) from exc
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            # A garbled or truncated reply is an HTTPException, not an OSError, and
-            # a credential or redirect the request cannot be encoded with is a
-            # ValueError; either way the backend is unusable, not the caller.
-            raise IssueBackendError("issue tracker unavailable") from exc
-        if len(raw) > _MAX_RESPONSE_BYTES:
-            raise IssueBackendError("issue tracker response too large")
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise IssueBackendError("issue tracker returned invalid JSON") from exc
+        headers = {"PRIVATE-TOKEN": key} if key else None
+        return self._http.request(method, path, params=params, body=body, headers=headers)
 
 
 def _iid(value: Any) -> str:
