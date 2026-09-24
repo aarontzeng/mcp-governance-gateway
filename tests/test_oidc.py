@@ -17,9 +17,10 @@ import unittest
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils as asym_utils
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import utils as asym_utils
 
-from mcp_governance_gateway.auth import AuthError, BearerTokenAuthenticator, Principal
+from mcp_governance_gateway.auth import AuthError, BearerTokenAuthenticator
 from mcp_governance_gateway.oidc import (
     CompositeAuthenticator,
     GrantsFile,
@@ -342,7 +343,7 @@ class GrantTests(_OidcTestCase):
         self.assertFalse(grants.stale)
 
     def test_a_grants_file_that_is_absent_at_startup_is_a_boot_failure(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(OSError):
             GrantsFile("/nonexistent/grants.json")
 
 

@@ -15,7 +15,11 @@ from mcp_governance_gateway.docs_review import DocsReviewService
 from mcp_governance_gateway.mcp import GatewayApp
 from mcp_governance_gateway.memory_backend import RequestContext
 from mcp_governance_gateway.redmine_keystore import KeyState
-from mcp_governance_gateway.review_backend import ReviewBackendError, ReviewSpec, parse_review_spec
+from mcp_governance_gateway.review_backend import (
+    ReviewBackendError,
+    ReviewSpec,
+    parse_review_spec,
+)
 
 SPEC = ReviewSpec(project="team-a", type="github", repo="org/handbook",
                   api="https://api.github.com", base_branch="main")
@@ -359,7 +363,9 @@ class GatewayTests(unittest.TestCase):
     def test_lint_is_available_on_a_read_only_corpus(self):
         import tempfile
         from pathlib import Path
+
         from test_docs_backend import _make_remote
+
         from mcp_governance_gateway.docs_backend import DocsCorpus
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -524,7 +530,10 @@ class ShippedExampleTests(unittest.TestCase):
     def test_only_the_comment_key_is_prose_a_leading_underscore_is_a_project(self):
         # `_scratch` is a legal project name and an existing test says so, so the
         # skip is exactly one key rather than a prefix rule.
-        import json as _json, tempfile, os
+        import json as _json
+        import os
+        import tempfile
+
         from mcp_governance_gateway.docs_backend import load_docs_repos
         path = os.path.join(tempfile.mkdtemp(), "r.json")
         with open(path, "w", encoding="utf-8") as handle:

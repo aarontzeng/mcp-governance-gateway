@@ -5,8 +5,8 @@ from typing import Any
 
 from mcp_governance_gateway.gitlab_backend import GitLabHttpBackend, _iid, _state_filter
 from mcp_governance_gateway.issue_backend import IssueBackendError
-from mcp_governance_gateway.redmine_keystore import KeyState
 from mcp_governance_gateway.memory_backend import RequestContext
+from mcp_governance_gateway.redmine_keystore import KeyState
 
 
 def _ctx(issue_project="grp/app", actor="10000000"):

@@ -17,7 +17,11 @@ import urllib.request
 from http import HTTPStatus
 
 from mcp_governance_gateway.audit import AuditSink
-from mcp_governance_gateway.auth import BearerTokenAuthenticator, IdentityVerifier, Principal
+from mcp_governance_gateway.auth import (
+    BearerTokenAuthenticator,
+    IdentityVerifier,
+    Principal,
+)
 from mcp_governance_gateway.internal_api import InternalApi
 from mcp_governance_gateway.server import GatewayHTTPServer, make_handler
 

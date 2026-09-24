@@ -37,14 +37,16 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, TypeGuard
 from urllib import error, request
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils as asym_utils
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import utils as asym_utils
 
 from .auth import AuthError, Principal
 from .hotfile import ReloadingFile
@@ -93,7 +95,7 @@ def _b64url(segment: str) -> bytes:
         raise AuthError("malformed token encoding") from exc
 
 
-def _finite_number(value: object) -> bool:
+def _finite_number(value: object) -> TypeGuard[int | float]:
     """A JSON number we can compare against a clock. Excludes bools (an int in
     Python) and the non-standard `NaN`/`Infinity` literals `json.loads` accepts."""
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
@@ -131,7 +133,8 @@ def _public_key_from_jwk(jwk: dict[str, Any]):
             e = int.from_bytes(_b64url(jwk["e"]), "big")
             return rsa.RSAPublicNumbers(e, n).public_key()
         if kty == "EC":
-            curve = _EC_CURVES.get(jwk.get("crv"))
+            crv = jwk.get("crv")
+            curve = _EC_CURVES.get(crv) if isinstance(crv, str) else None
             if curve is None:
                 return None
             x = int.from_bytes(_b64url(jwk["x"]), "big")
@@ -425,7 +428,7 @@ class OidcAuthenticator:
             # The IDENTITY, not the token instance: an access token is refreshed
             # every few minutes, and binding a pending confirmation to the token
             # string would expire the confirmation whenever the client refreshed.
-            token_id=hashlib.sha256(f"{self._issuer}|{subject}".encode("utf-8")).hexdigest()[:12],
+            token_id=hashlib.sha256(f"{self._issuer}|{subject}".encode()).hexdigest()[:12],
             issue_project=grant.issue_project,
             email=email.strip() if isinstance(email, str) and email.strip() else None,
         )

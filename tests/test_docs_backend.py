@@ -19,7 +19,11 @@ from mcp_governance_gateway.docs_backend import (
     tokenize,
 )
 from mcp_governance_gateway.mcp import GatewayApp, visible_tool_definitions
-from mcp_governance_gateway.memory_backend import ActorLabels, MemoryBackend, RequestContext
+from mcp_governance_gateway.memory_backend import (
+    ActorLabels,
+    MemoryBackend,
+    RequestContext,
+)
 
 
 class TokenizeTests(unittest.TestCase):
@@ -916,8 +920,6 @@ class SnapshotConsistencyTests(unittest.TestCase):
         corpus = DocsCorpus({"p": {"url": self.remote, "branch": "master"}}, self.clones,
                             pull_interval_sec=0.0)
         corpus.get("wiki/x.md", _ctx("p"))          # first refresh, clone exists
-        dest = [p for p in Path(self.clones).iterdir() if p.is_dir()][0]
-
         original = corpus._load_docs
 
         def move_head_then_load(d, commit):

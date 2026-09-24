@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .hotfile import ReloadingFile
 
@@ -65,12 +66,12 @@ class BearerTokenAuthenticator:
         return self._store.value
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "BearerTokenAuthenticator":
+    def from_file(cls, path: str | Path) -> BearerTokenAuthenticator:
         return cls.from_files([(path, True)])
 
     @classmethod
     def from_files(cls, sources: list[tuple[str | Path, bool]],
-                   allow_empty: bool = False) -> "BearerTokenAuthenticator":
+                   allow_empty: bool = False) -> BearerTokenAuthenticator:
         """`allow_empty` is for a deployment whose identities come from elsewhere.
 
         The empty-merge guard exists to catch a misconfigured token store, which
@@ -164,7 +165,7 @@ class IdentityVerifier:
         email = header_get(f"{self.prefix}-Email") or ""
         expected = hmac.new(
             self.secret.encode("utf-8"),
-            f"{user_id}:{email}".encode("utf-8"),
+            f"{user_id}:{email}".encode(),
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(expected, signature):

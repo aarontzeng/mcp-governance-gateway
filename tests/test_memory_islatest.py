@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from mcp_governance_gateway.memory_backend import HttpMemoryBackend, MemoryBackendError, RequestContext
+from mcp_governance_gateway.memory_backend import (
+    HttpMemoryBackend,
+    MemoryBackendError,
+    RequestContext,
+)
 
 
 class ListSupersededTests(unittest.TestCase):

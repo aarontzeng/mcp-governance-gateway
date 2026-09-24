@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import unittest
-from typing import Any
 
 from mcp_governance_gateway.audit import AuditEvent, AuditSink
 from mcp_governance_gateway.auth import Principal
-from mcp_governance_gateway.ci_backend import CiBackendError, JenkinsHttpBackend, load_ci_jobs
+from mcp_governance_gateway.ci_backend import (
+    CiBackendError,
+    JenkinsHttpBackend,
+    load_ci_jobs,
+)
 from mcp_governance_gateway.mcp import GatewayApp
 from mcp_governance_gateway.memory_backend import MemoryBackend, RequestContext
 
@@ -410,7 +413,9 @@ class LogTests(unittest.TestCase):
 
 class LoadJobsTests(unittest.TestCase):
     def test_load_and_validate(self):
-        import json as _json, tempfile, os
+        import json as _json
+        import os
+        import tempfile
         d = tempfile.mkdtemp()
         p = os.path.join(d, "jobs.json")
         open(p, "w").write(_json.dumps({"proj-a": ["a", "b"]}))

@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 from mcp_governance_gateway.admin_cli import main
-from mcp_governance_gateway.auth import BearerTokenAuthenticator
+from mcp_governance_gateway.auth import AuthError, BearerTokenAuthenticator
 
 
 class _CliTestCase(unittest.TestCase):
@@ -26,8 +26,8 @@ class _CliTestCase(unittest.TestCase):
             os.environ.pop(name, None)
 
     def run_cli(self, *argv, capture=True):
-        import io
         import contextlib
+        import io
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main(["--store", str(self.store), *argv])
@@ -135,7 +135,7 @@ class RotateAndRevokeTests(_CliTestCase):
         self.assertEqual(entry["roles"], ["issue_writer"])
         auth = BearerTokenAuthenticator.from_file(self.store)
         self.assertEqual(auth.authenticate_header(f"Bearer {new}").actor, "1")
-        with self.assertRaises(Exception):
+        with self.assertRaises(AuthError):
             auth.authenticate_header(f"Bearer {self.token}")
 
     def test_revoke_removes_the_entry(self):

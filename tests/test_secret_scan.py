@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import unittest
 
+from fakes import FakeIssueBackend, FakeMemoryBackend
+
+from mcp_governance_gateway.audit import ListAuditSink
 from mcp_governance_gateway.auth import Principal
 from mcp_governance_gateway.mcp import GatewayApp
 from mcp_governance_gateway.secret_scan import find_secret
-
-from test_phase1_mcp import FakeIssueBackend, FakeMemoryBackend, ListAuditSink
 
 # Clearly fake, pattern-shaped specimens (never real credentials). Most are built
 # by concatenation, so the credential-shaped literal never appears in the source and

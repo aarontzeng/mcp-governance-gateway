@@ -13,7 +13,11 @@ import time
 import unittest
 from pathlib import Path
 
-from mcp_governance_gateway.hotfile import ReloadingFile, atomic_write_json, file_signature
+from mcp_governance_gateway.hotfile import (
+    ReloadingFile,
+    atomic_write_json,
+    file_signature,
+)
 
 
 def _bump(path: Path) -> None:
@@ -47,16 +51,16 @@ class ReloadingFileTests(unittest.TestCase):
 
     def test_a_changed_file_is_re_read_once(self):
         store = self._store()
-        store.current
+        store.refresh()
         self.path.write_text(json.dumps({"v": 2}), encoding="utf-8")
         _bump(self.path)
         self.assertEqual(store.current, {"v": 2})
-        store.current
+        store.refresh()
         self.assertEqual(self.parses, 2)
 
     def test_a_corrupt_file_keeps_the_last_good_value_and_says_so(self):
         store = self._store()
-        store.current
+        store.refresh()
         self.path.write_text("{ nope", encoding="utf-8")
         _bump(self.path)
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -75,12 +79,12 @@ class ReloadingFileTests(unittest.TestCase):
         # For an allow-list, last-good is fail-open, so a repair that lands with
         # an identical signature must still be picked up.
         store = self._store(retry_failed=True)
-        store.current
+        store.refresh()
         self.path.write_text("{ nope", encoding="utf-8")
         _bump(self.path)
         with contextlib.redirect_stderr(io.StringIO()):
-            store.current
-            store.current
+            store.refresh()
+            store.refresh()
         self.assertEqual(self.parses, 3)
         self.assertTrue(store.stale)
 
@@ -92,12 +96,12 @@ class ReloadingFileTests(unittest.TestCase):
         self.parses = 0
         store = self._store(load_now=True)
         self.assertEqual(store.value, {"v": 9})
-        store.current
+        store.refresh()
         self.assertEqual(self.parses, 1, "the construction-time parse stamped the signature")
 
     def test_publish_records_a_write_of_our_own_without_re_reading_it(self):
         store = self._store()
-        store.current
+        store.refresh()
         atomic_write_json(self.path, {"v": 7})
         store.publish({"v": 7})
         self.assertEqual(store.current, {"v": 7})

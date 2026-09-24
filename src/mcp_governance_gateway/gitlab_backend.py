@@ -21,20 +21,21 @@ Deliberate v1 boundaries (documented, not accidental):
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from urllib import parse
 
+from .http_client import JsonHttpClient
 from .issue_backend import (
     IssueBackend,
     IssueBackendError,
+    _attribution,
     _d,
     _enrollment_hint,
     _normalize_status,
     _with_attribution,
-    _attribution,
 )
 from .memory_backend import RequestContext
-from .http_client import JsonHttpClient
 from .redmine_keystore import KeyState
 
 # Fields with no GitLab equivalent wired here. Refused by name on every write path:

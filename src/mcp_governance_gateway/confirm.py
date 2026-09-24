@@ -6,7 +6,8 @@ import json
 import secrets
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .auth import Principal
 
@@ -64,7 +65,7 @@ class ConfirmationStore:
                 raw = value.encode("utf-8")
             else:
                 canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-                raw = f"{type(value).__name__}:{canonical}".encode("utf-8")
+                raw = f"{type(value).__name__}:{canonical}".encode()
             out[key] = hashlib.sha256(raw).hexdigest()[:8]
         return out
 

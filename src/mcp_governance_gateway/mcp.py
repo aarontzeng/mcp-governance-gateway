@@ -28,7 +28,13 @@ from .issue_backend import IssueBackend
 from .limits import InMemoryMemoryWriteLimiter, MemoryLimitConfig, MemoryWriteLimiter
 from .memory_backend import MemoryBackend, RequestContext
 from .policy import Policy, PolicyDecision
-from .tools import HANDLERS, SPECS_BY_NAME, tool_definitions, visible_tool_definitions, visible_tools
+from .tools import (
+    HANDLERS,
+    SPECS_BY_NAME,
+    tool_definitions,
+    visible_tool_definitions,
+    visible_tools,
+)
 from .tools.base import (
     FEATURE_CI,
     FEATURE_CI_WRITE,

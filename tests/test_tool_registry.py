@@ -7,7 +7,13 @@ import unittest
 
 from mcp_governance_gateway.auth import Principal
 from mcp_governance_gateway.policy import Policy
-from mcp_governance_gateway.tools import HANDLERS, REGISTRY, SPECS_BY_NAME, tool_definitions, visible_tools
+from mcp_governance_gateway.tools import (
+    HANDLERS,
+    REGISTRY,
+    SPECS_BY_NAME,
+    tool_definitions,
+    visible_tools,
+)
 from mcp_governance_gateway.tools.base import (
     FEATURE_CI,
     FEATURE_CI_WRITE,

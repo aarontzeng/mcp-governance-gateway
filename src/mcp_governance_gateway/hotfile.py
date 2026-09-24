@@ -33,8 +33,9 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Generic, Sequence, TypeVar
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 

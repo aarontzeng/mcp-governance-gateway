@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
-from enum import Enum
 import json
 import os
-from pathlib import Path
 import sys
 import threading
+from datetime import UTC, datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any
 
 from .hotfile import ReloadingFile, atomic_write_json
 
-try:  # cryptography is a runtime dependency; guard the import so the enum stays importable
+# cryptography is a runtime dependency; the import is guarded so the enum stays
+# importable without it, and `degraded` then reports the store as unusable.
+AESGCM: Any
+try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 except Exception:  # pragma: no cover - only hit when cryptography is absent
-    AESGCM = None  # type: ignore[assignment]
+    AESGCM = None
 
 
 class KeyState(Enum):
@@ -40,7 +44,7 @@ def _b64d(text: str) -> bytes:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def load_master_keys(path: str | Path) -> tuple[str | None, dict[str, bytes]]:
@@ -210,7 +214,8 @@ class CredentialStore:
             # record has already returned MISSING, so this is reached only when a
             # record exists.
             return KeyState.DEGRADED, None
-        master = self._master_keys.get(rec.get("key_id"))
+        key_id = rec.get("key_id")
+        master = self._master_keys.get(key_id) if isinstance(key_id, str) else None
         if master is None:
             return KeyState.UNDECRYPTABLE, None
         try:
@@ -247,7 +252,7 @@ class CredentialStore:
         nonce = os.urandom(_NONCE_BYTES)
         # New entries always carry the backend and use the versioned AAD (see get);
         # re-enrolling upgrades a legacy entry in place.
-        aad = f"{actor}|{backend}".encode("utf-8")
+        aad = f"{actor}|{backend}".encode()
         ct = AESGCM(master).encrypt(nonce, plaintext.encode("utf-8"), aad)
         record = {
             "ct": _b64e(nonce + ct),

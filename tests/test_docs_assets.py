@@ -1,15 +1,19 @@
 import io
 import os
+import unittest
+from dataclasses import replace
 from email.message import Message
 from types import SimpleNamespace
-import unittest
 from unittest.mock import patch
-from dataclasses import replace
 
 from mcp_governance_gateway.auth import AuthError
 from mcp_governance_gateway.config import Settings
 from mcp_governance_gateway.docs_assets import (
-    AssetStage, AssetStageError, MAX_ASSET_BYTES, STAGE_TTL_SEC, URL_TTL_SEC,
+    MAX_ASSET_BYTES,
+    STAGE_TTL_SEC,
+    URL_TTL_SEC,
+    AssetStage,
+    AssetStageError,
 )
 from mcp_governance_gateway.server import build_server, make_handler
 

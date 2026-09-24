@@ -15,8 +15,8 @@ same record.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 from .auth import Principal
 from .tools import SPECS_BY_NAME, ToolSpec

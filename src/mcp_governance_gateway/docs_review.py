@@ -15,7 +15,8 @@ rather than about a robot with a token. A caller who has not enrolled gets a
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .memory_backend import RequestContext
 from .redmine_keystore import KeyState

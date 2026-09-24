@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from datetime import date
-from typing import Any, Callable
+from typing import Any
 
-from .memory_backend import RequestContext
 from .errors import BackendError
 from .http_client import JsonHttpClient
+from .memory_backend import RequestContext
 from .redmine_keystore import KeyState
 
 
@@ -114,6 +115,14 @@ class IssueBackend:
         raise NotImplementedError
 
     def categories(self, context: RequestContext) -> dict[str, Any]:
+        raise NotImplementedError
+
+    # The credential-enrollment path (internal_api.py) needs these two of every
+    # tracker: who a submitted credential belongs to, and that person's issues.
+    def verify_key(self, plaintext: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def list_assigned_to_me(self, key: str, context: RequestContext) -> dict[str, Any]:
         raise NotImplementedError
 
 

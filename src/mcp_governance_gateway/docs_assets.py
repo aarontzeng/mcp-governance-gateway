@@ -9,12 +9,12 @@ consuming it.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
 import secrets
 import threading
 import time
-from typing import Callable, Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 from .errors import BackendError
 

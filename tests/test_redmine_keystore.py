@@ -5,9 +5,9 @@ import contextlib
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from mcp_governance_gateway.audit import ListAuditSink
 from mcp_governance_gateway.auth import Principal
@@ -350,6 +350,7 @@ class BackendDimensionTests(unittest.TestCase):
     def _write_legacy_entry(self, actor, plaintext):
         """Craft a pre-rename record: AAD = actor, no 'backend' field."""
         import json as _json
+
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _A
         nonce = os.urandom(12)
         ct = _A(self.keys["mk1"]).encrypt(nonce, plaintext.encode(), actor.encode())

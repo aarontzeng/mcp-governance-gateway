@@ -333,6 +333,7 @@ def call(host: ToolHost, name: str, arguments: dict[str, Any], principal: Princi
         def propose(body: str) -> dict[str, Any]:
             if name == "docs.create":
                 return review.create(path, body, message, context)
+            assert base_sha is not None   # required above for docs.update
             return review.update(path, body, message, base_sha, context)
 
         if staged_id is not None:

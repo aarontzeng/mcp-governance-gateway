@@ -8,10 +8,12 @@ large ones.
 ```bash
 pip install -e '.[dev]'      # or: pip install -e . && pip install pytest
 python -m pytest -q
+ruff check src tests         # correctness rules only; configured in pyproject
+mypy                         # the whole of src, configured in pyproject
 ```
 
-There is no separate build step — the gateway is pure Python. "Tests pass" is
-the bar for a change; every backend has unit tests that drive it through a
+There is no separate build step — the gateway is pure Python. "Tests pass,
+ruff and mypy are clean" is the bar for a change, and CI runs all three; every backend has unit tests that drive it through a
 scripted fake (see `tests/`), so you can add or change a backend without a live
 instance.
 

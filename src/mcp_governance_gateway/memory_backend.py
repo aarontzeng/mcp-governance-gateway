@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import builtins
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ class RequestContext:
         return self.issue_project
 
     @classmethod
-    def from_principal(cls, principal: Principal, request_id: str, client: str = "unknown") -> "RequestContext":
+    def from_principal(cls, principal: Principal, request_id: str, client: str = "unknown") -> RequestContext:
         return cls(
             actor=principal.actor,
             project=principal.project,
@@ -133,7 +134,7 @@ class HttpMemoryBackend(MemoryBackend):
         list_path: str = "/agentmemory/memories",
         lesson_path: str = "/agentmemory/lessons",
         action_path: str = "/agentmemory/actions",
-        actor_labels: "ActorLabels | None" = None,
+        actor_labels: ActorLabels | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._backend_token = backend_token
@@ -161,7 +162,7 @@ class HttpMemoryBackend(MemoryBackend):
             new: list[Any] = []
             for c in concepts:
                 if isinstance(c, str) and c.startswith("actor:"):
-                    new.append("actor:" + _display_actor(c[len("actor:"):], labels))
+                    new.append("actor:" + (_display_actor(c[len("actor:"):], labels) or c[len("actor:"):]))
                 else:
                     new.append(c)
             out["concepts"] = new
@@ -350,8 +351,10 @@ class HttpMemoryBackend(MemoryBackend):
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         return _decode(self._http.request("GET", path, params=params))
 
-    def _fetch_all_memories(self) -> tuple[list[dict[str, Any]], bool]:
-        out: list[dict[str, Any]] = []
+    # `builtins.list`: this class has a `list` method, which is what a bare
+    # `list[...]` annotation inside it would name.
+    def _fetch_all_memories(self) -> tuple[builtins.list[dict[str, Any]], bool]:
+        out: builtins.list[dict[str, Any]] = []
         offset = 0
         page_size = 500
         while len(out) < _LIST_FETCH_MAX:

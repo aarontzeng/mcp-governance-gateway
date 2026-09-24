@@ -15,6 +15,7 @@ existed, so `docs.get` cannot be used to probe the repo tree.
 """
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import math
@@ -53,7 +54,7 @@ def tokenize(text: str) -> list[str]:
     tokens = _WORD_RE.findall(low)
     cjk = _CJK_RE.findall(low)
     tokens.extend(cjk)
-    tokens.extend(a + b for a, b in zip(cjk, cjk[1:]))
+    tokens.extend(a + b for a, b in zip(cjk, cjk[1:], strict=False))   # bigrams: one shorter by design
     return tokens
 
 
@@ -192,13 +193,13 @@ class DocsCorpus:
 
     def __init__(
         self,
-        repos: dict[str, dict[str, str]],
+        repos: dict[str, dict[str, Any]],
         clone_dir: str,
         *,
         pull_interval_sec: float = 300.0,
         git_timeout_sec: float = 30.0,
         repos_file: str | None = None,
-        actor_labels: "ActorLabels | None" = None,
+        actor_labels: ActorLabels | None = None,
     ) -> None:
         self._clone_dir = clone_dir
         self._pull_interval = pull_interval_sec
@@ -263,7 +264,7 @@ class DocsCorpus:
                 lock = self._refresh_locks[project] = threading.Lock()
             return lock
 
-    def review_spec_for(self, project: str | None) -> "ReviewSpec | None":
+    def review_spec_for(self, project: str | None) -> ReviewSpec | None:
         """This project's review host, or None when its corpus is read-only.
 
         Read-only is the default and the majority case: a `review` block is what
@@ -364,7 +365,7 @@ class DocsCorpus:
         doc = snap.docs.get(_normalize(path))
         if doc is None:
             raise DocsBackendError("document not found", status=404)
-        result = {
+        result: dict[str, Any] = {
             "path": doc.path,
             "title": doc.title,
             "frontmatter": doc.meta,
@@ -568,7 +569,9 @@ class DocsCorpus:
             )
         return docs
 
-    def _read_blobs(self, dest: str, wanted: list[tuple[str, str, int]]) -> dict[str, bytes]:
+    # `builtins.list`: this class has a `list` method, which is what a bare
+    # `list[...]` annotation inside it would name.
+    def _read_blobs(self, dest: str, wanted: builtins.list[tuple[str, str, int]]) -> dict[str, bytes]:
         """Blob contents by object id, in one `cat-file --batch` round trip.
 
         The batch output is `<oid> blob <size>\n<content>\n` per request, framed by
@@ -628,12 +631,13 @@ class DocsCorpus:
         return out.stdout.decode("utf-8", errors="surrogateescape")
 
 
-def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
+def load_docs_repos(path: str) -> dict[str, dict[str, Any]]:
+    """project -> {url, branch, and a parsed `review` spec where one is declared}."""
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
     if not isinstance(data, dict):
         raise ValueError("docs repos file must be a JSON object of project -> {url, branch}")
-    repos: dict[str, dict[str, str]] = {}
+    repos: dict[str, dict[str, Any]] = {}
     urls: set[str] = set()
     for project, spec in data.items():
         # JSON has no comments, and a config file an operator reads deserves
@@ -649,7 +653,7 @@ def load_docs_repos(path: str) -> dict[str, dict[str, str]]:
             raise ValueError(f"docs repo key {project!r} must be a plain name (letters, digits, . _ -; no leading dot)")
         if not isinstance(spec, dict) or not spec.get("url"):
             raise ValueError(f"docs repo entry for {project!r} needs a url")
-        entry = {"url": str(spec["url"]), "branch": str(spec.get("branch", "master"))}
+        entry: dict[str, Any] = {"url": str(spec["url"]), "branch": str(spec.get("branch", "master"))}
         url_key = entry["url"].casefold()
         if url_key in urls:
             raise ValueError("two projects cannot map the same docs repo URL")

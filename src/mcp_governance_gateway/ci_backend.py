@@ -21,14 +21,14 @@ import base64
 import http.client
 import json
 import math
-from datetime import datetime, timezone
-from typing import Any, Iterator
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import Any
 from urllib import error, parse, request
 
 from .errors import BackendError
 from .http_client import JsonHttpClient
 from .memory_backend import RequestContext
-
 
 
 class CiBackendError(BackendError):
@@ -138,7 +138,7 @@ def _iso_from_ms(millis: int | None) -> str | None:
     if millis is None:
         return None
     try:
-        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        return datetime.fromtimestamp(millis / 1000, tz=UTC).isoformat().replace("+00:00", "Z")
     except (OverflowError, OSError, ValueError):
         return None  # a nonsense epoch from the CI server is not a reason to fail the read
 
@@ -273,10 +273,10 @@ class JenkinsHttpBackend:
         self._trigger_jobs = trigger_jobs_by_project or {}
 
     def has_project(self, project: str | None) -> bool:
-        return bool(project) and bool(self._jobs.get(project))
+        return project is not None and bool(self._jobs.get(project))
 
     def has_trigger_project(self, project: str | None) -> bool:
-        return bool(project) and bool(self._trigger_jobs.get(project))
+        return project is not None and bool(self._trigger_jobs.get(project))
 
     # --- tools ---------------------------------------------------------
 

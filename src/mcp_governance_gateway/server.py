@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from http import HTTPStatus
 import http.client
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 import re
@@ -11,33 +9,41 @@ import sys
 import threading
 import time
 import uuid
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib import error, request
 from urllib.parse import parse_qs, urlparse, urlsplit
 
 from .audit import AuditEvent, AuditSink, JsonLinesAuditSink
 from .auth import AuthError, BearerTokenAuthenticator, IdentityVerifier
-from .config import Settings
-from .docs_review import DocsReviewService
-from .docs_assets import AssetStage, AssetStageError, MAX_ASSET_BYTES
-from .review_backend import GitHubReviewBackend
-from .oidc import CompositeAuthenticator, GrantsFile, JwksCache, OidcAuthenticator, discover_jwks_url
 from .ci_backend import (
+    STREAM_CHUNK,
     CiBackendError,
     JenkinsHttpBackend,
-    STREAM_CHUNK,
     load_ci_jobs,
     load_ci_trigger_jobs,
 )
+from .config import Settings
+from .docs_assets import MAX_ASSET_BYTES, AssetStage, AssetStageError
 from .docs_backend import DocsCorpus, load_docs_repos
-from .internal_api import InternalApi
+from .docs_review import DocsReviewService
 from .gitlab_backend import GitLabHttpBackend
-from .issue_backend import RedmineHttpBackend
+from .internal_api import InternalApi
+from .issue_backend import IssueBackend, RedmineHttpBackend
 from .limits import InMemoryMemoryWriteLimiter, MemoryLimitConfig
 from .mcp import GatewayApp
 from .memory_backend import ActorLabels, HttpMemoryBackend, RequestContext
+from .oidc import (
+    CompositeAuthenticator,
+    GrantsFile,
+    JwksCache,
+    OidcAuthenticator,
+    discover_jwks_url,
+)
 from .redmine_keystore import CredentialStore, load_master_keys
-
+from .review_backend import GitHubReviewBackend
 
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -81,14 +87,14 @@ class GatewayHTTPServer(ThreadingHTTPServer):
     asset_stage: AssetStage | None = None
     audit_sink: AuditSink | None = None            # artifact transfers are audited here
     artifact_max_bytes: int = 256 * 1024 * 1024
-    artifact_streams: "threading.Semaphore" = threading.Semaphore(4)
+    artifact_streams: threading.Semaphore = threading.Semaphore(4)
     # Which surfaces this listener answers. One process may run two: the MCP
     # listener agents reach, and an admin listener for credential enrollment.
     # A route this listener does not serve is 404, not 403 -- an admin surface
     # that is not routed here should look absent rather than forbidden.
     serves_mcp: bool = True
     serves_internal: bool = True
-    oidc_grants: "GrantsFile | None" = None   # for the /healthz staleness flag
+    oidc_grants: GrantsFile | None = None   # for the /healthz staleness flag
 
 
 # `/internal/redmine-key` was named when Redmine was the only backend; the store
@@ -472,7 +478,7 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def _with_oidc(tokens: BearerTokenAuthenticator, settings: Settings) -> tuple[Any, "GrantsFile | None"]:
+def _with_oidc(tokens: BearerTokenAuthenticator, settings: Settings) -> tuple[Any, GrantsFile | None]:
     """Wrap the token authenticator so OIDC answers what the token file does not.
 
     Fail-loud at boot: an unreachable IdP here means discovery failed, and a
@@ -481,13 +487,14 @@ def _with_oidc(tokens: BearerTokenAuthenticator, settings: Settings) -> tuple[An
     forced at boot -- once running, an IdP outage keeps the last-good keys
     rather than locking everyone out (oidc.JwksCache).
     """
-    if not settings.oidc_enabled:
-        return tokens, None
-    jwks_url = settings.oidc_jwks_url or discover_jwks_url(settings.oidc_issuer)
-    grants = GrantsFile(settings.oidc_grants_file)
+    issuer, audience, grants_file = settings.oidc_issuer, settings.oidc_audience, settings.oidc_grants_file
+    if not (issuer and audience and grants_file):
+        return tokens, None   # Settings.from_env refuses a half-configured OIDC, so this is "off"
+    jwks_url = settings.oidc_jwks_url or discover_jwks_url(issuer)
+    grants = GrantsFile(grants_file)
     oidc = OidcAuthenticator(
-        issuer=settings.oidc_issuer,
-        audience=settings.oidc_audience,
+        issuer=issuer,
+        audience=audience,
         jwks=JwksCache(jwks_url, ttl_sec=settings.oidc_jwks_ttl_sec),
         grants=grants,
         clock_skew_sec=settings.oidc_clock_skew_sec,
@@ -501,7 +508,7 @@ def _with_oidc(tokens: BearerTokenAuthenticator, settings: Settings) -> tuple[An
 
 def build_server(settings: Settings) -> GatewayHTTPServer:
     request.install_opener(request.build_opener(SameOriginRedirects))
-    token_sources: list[tuple[str, bool]] = []
+    token_sources: list[tuple[str | Path, bool]] = []
     if settings.token_file:
         token_sources.append((settings.token_file, True))
     if settings.user_token_file:
@@ -557,7 +564,7 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
             "REDMINE_ENFORCE_PERSONAL_KEY is set but REDMINE_KEYSTORE_FILE is not — "
             "enforced per-user mode needs a key store"
         )
-    issue_backend = None
+    issue_backend: IssueBackend | None = None
     if settings.issue_backend == "gitlab":
         # GitLab deployment (ADR-0013): shared token + attribution footer, with
         # the same per-user credential store as Redmine (keyed by backend) and
@@ -666,6 +673,7 @@ def build_admin_server(settings: Settings, main_server: GatewayHTTPServer) -> Ga
     revocation that took effect on one socket and not the other is the kind of
     difference nobody notices until it matters.
     """
+    assert settings.admin_port is not None, "build_admin_server is called only when ADMIN_PORT is set"
     admin = GatewayHTTPServer((settings.admin_host, settings.admin_port), make_handler())
     admin.app = main_server.app
     admin.authenticator = main_server.authenticator

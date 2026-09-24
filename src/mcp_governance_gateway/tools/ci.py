@@ -162,8 +162,8 @@ def call(host: ToolHost, name: str, arguments: dict[str, Any], principal: Princi
         job = args.required_text(arguments, "job", max_len=200)
         return backend.log(job, context, args.optional_int(arguments, "lines", minimum=1, maximum=1000))
     if name == "ci.builds":
-        job = args.optional_text(arguments, "job", max_len=200)
-        return backend.builds(job, context, args.optional_int(arguments, "count", minimum=1, maximum=50))
+        job_filter = args.optional_text(arguments, "job", max_len=200)
+        return backend.builds(job_filter, context, args.optional_int(arguments, "count", minimum=1, maximum=50))
     if name == "ci.artifact":
         job = args.required_text(arguments, "job", max_len=200)
         build = args.optional_int(arguments, "build", minimum=1, maximum=_BUILD_MAX)

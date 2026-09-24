@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from dataclasses import dataclass
 import threading
 import time
-from typing import Callable
+from collections import defaultdict, deque
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from .auth import Principal
 

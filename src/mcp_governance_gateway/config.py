@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import os
+from dataclasses import dataclass
+from typing import overload
 from urllib.parse import urlsplit
 
 
@@ -113,7 +114,7 @@ class Settings:
         return bool(self.oidc_issuer)
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         oidc_issuer = _url_env("OIDC_ISSUER")
         oidc_audience = os.environ.get("OIDC_AUDIENCE") or None
         oidc_grants_file = os.environ.get("OIDC_GRANTS_FILE") or None
@@ -208,12 +209,16 @@ def _int_env(name: str, default: int, *, minimum: int | None = None) -> int:
     return parsed
 
 
+@overload
+def _url_env(name: str) -> str | None: ...
+@overload
+def _url_env(name: str, default: str) -> str: ...
 def _url_env(name: str, default: str | None = None) -> str | None:
     # A base URL urlopen cannot use ("ci.internal:8080" without a scheme, or a
     # path http.client cannot encode) would fail on every request; refusing it
     # at startup names the operator's mistake once.
     value = os.environ.get(name, default)
-    if not value and default is None:
+    if value is None or (not value and default is None):
         return None     # an optional backend, unset or set empty
     parts = urlsplit(value)
     if parts.scheme not in ("http", "https") or not parts.netloc or not value.isascii():

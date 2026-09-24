@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections import deque
 import threading
 import time
 import uuid
+from collections import deque
 
 from .audit import AuditEvent, AuditSink
 from .auth import Principal

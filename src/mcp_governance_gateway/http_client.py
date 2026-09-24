@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import http.client
 import json
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 from urllib import error, parse, request
 
 from .errors import BackendError

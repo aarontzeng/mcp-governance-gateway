@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
-from mcp_governance_gateway.memory_backend import ActorLabels, HttpMemoryBackend, _display_actor
+from mcp_governance_gateway.memory_backend import (
+    ActorLabels,
+    HttpMemoryBackend,
+    _display_actor,
+)
 
 
 class DisplayActorTests(unittest.TestCase):
