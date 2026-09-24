@@ -14,8 +14,16 @@ All notable changes to this project are recorded here. The format follows
 - A review host answering a write with an empty body (204) was reported as "invalid JSON"; an empty body is an empty object, as every other adapter already read it. A ref reply whose `object` was not an object raised past the error boundary.
 - A docs refresh whose fetch brought no new commit re-read every blob, replayed the whole log and rebuilt the index; it now only moves the freshness stamp.
 
+### Added
+
+- `DOCS_GIT_TIMEOUT_SEC` (default 30): the per-call git timeout the docs corpus always had and nothing configured.
+- `/healthz` reports `version`. It is unauthenticated, so an ingress that publishes it publishes the version (see operations.md).
+- The container image has a `HEALTHCHECK` against `/healthz`, and its base is pinned by digest; Dependabot's docker ecosystem moves the pin monthly.
+- operations.md tabulates the process-local state, its bound and what reclaims it — including that tracker project ids are cached until restart and that a retargeted docs project leaves its old clone on disk.
+
 ### Changed
 
+- Bearer lookup is by the token's SHA-256 rather than a comparison with every stored token: measured 108 µs → 5.3 µs per request at 1,000 tokens, 537 µs → 13 µs at 5,000.
 - **Credential enrollment names its backend.** Audit events are `credentials.set` / `credentials.clear` (were `redmine.key.set` / `redmine.key.clear` on every deployment, GitLab included); refusals name the deployment's tracker; the enrollment response and `status` carry `login` beside `redmineLogin`, which deployed enrollment pages still read. The store class is `CredentialStore` (`RedmineKeyStore` remains an alias); the `REDMINE_KEYSTORE_*` variables are unchanged.
 - **Diagnostics go through `logging` to stderr**, each line with a level and the module that spoke. The "listening on" lines no longer go to stdout, which is now the audit stream's alone.
 - **Unrouted paths answer 404 for every method** (an unrouted GET or DELETE used to answer 405); a served path asked for with a method it does not take answers 405, as `GET /mcp` always has.
@@ -28,6 +36,8 @@ All notable changes to this project are recorded here. The format follows
 - `hotfile.ReloadingFile` replaces five change-detected reload loops with one (last-good, logged and throttled, `stale`, reloads serialized); the credential store's read path is now under that lock. `hotfile.atomic_write_json` is the one atomic writer for the token store and the credential store.
 - `http_client.JsonHttpClient` replaces five copies of the urlopen / error-mapping / body-cap / decode path.
 - `mcp.py` is split: `tools/` holds one `ToolSpec` per tool beside its family's handler, `policy.py` derives its decision from the spec, and `tools/list` filters the same records; a test walks every roles × tenant × features combination and holds discovery to policy.
+- `GatewayApp` takes any `confirm.ConfirmationBackend`; `tests/test_confirm_contract.py` states what a shared implementation must keep. `ConfirmationStore` stays the default.
+- The attribution footer lives in `attribution.py`; a test pins the exact bytes issue notes and review comments carry.
 - `server.py` routes from one table, builds each backend in its own factory, and streams artifacts from `artifact_route.py`.
 - `tests/test_phase1_mcp.py` (3100 lines) is seven files named for what they cover; ruff (correctness rules) and mypy over all of `src` run in CI.
 
