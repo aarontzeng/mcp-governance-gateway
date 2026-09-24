@@ -45,10 +45,14 @@ assertion message, so if you see that, check `git --version` first.
 ## Adding a backend
 
 Implement the backend's interface (see `issue_backend.py` for the pattern:
-public operations, a private project resolver, a normalized output shape),
-enable it from configuration in `config.py` and wire it in `server.py`, expose
-its tools in `mcp.py`, and cover it with fake-driven tests. A backend must be
-inert unless its configuration is present.
+public operations, a private project resolver, a normalized output shape; HTTP
+goes through `http_client.JsonHttpClient`, errors subclass
+`errors.BackendError`), enable it from configuration in `config.py` and wire it
+in `server.py`, declare its tools as `ToolSpec`s with a `call` handler in a
+`tools/<family>.py` module and list that module in `tools/registry.py`, and
+cover it with fake-driven tests. Policy, `tools/list` and dispatch all read the
+registry, so a tool declared there needs no further registration. A backend
+must be inert unless its configuration is present.
 
 ## Commit messages
 

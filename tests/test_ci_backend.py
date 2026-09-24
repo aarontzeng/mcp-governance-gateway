@@ -950,8 +950,8 @@ class GatewayCiTests(unittest.TestCase):
                          ci_backend=FakeJenkins(replies={"tree=builds": _json.dumps(
                              {"builds": [{"number": 5, "result": "FAILURE"}]}).encode()}))
         reads: list = []
-        original = app._memory_write_limiter.check_read
-        app._memory_write_limiter.check_read = lambda p: (reads.append(p) or original(p))
+        original = app.write_limiter.check_read
+        app.write_limiter.check_read = lambda p: (reads.append(p) or original(p))
         before = len(self.audit.events)
         resp = app.handle_rpc(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -980,14 +980,14 @@ class GatewayCiTests(unittest.TestCase):
         self.assertEqual(denied["error"]["code"], -32003)
         self.assertIn("ci run role", denied["error"]["message"])
         self.assertEqual(self.audit.events[-1].outcome, "denied")
-        self.assertEqual(app._ci_backend.posts, [])
+        self.assertEqual(app.ci_backend.posts, [])
 
         # With the role, the FIRST call must not start anything: it asks to confirm.
         first = app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                 "params": {"name": "ci.rerun", "arguments": {"job": "swarm-build"}}}, runner)
         pending = first["result"]["structuredContent"]
         self.assertTrue(pending["confirmationRequired"])
-        self.assertEqual(app._ci_backend.posts, [], "a build was started before the confirmation")
+        self.assertEqual(app.ci_backend.posts, [], "a build was started before the confirmation")
         self.assertEqual(self.audit.events[-1].outcome, "confirm_required")
 
         # The second call, carrying the id, is the one that spends CI capacity.
@@ -996,7 +996,7 @@ class GatewayCiTests(unittest.TestCase):
              "params": {"name": "ci.rerun",
                         "arguments": {"job": "swarm-build", "confirm": pending["confirmationId"]}}}, runner)
         self.assertEqual(second["result"]["structuredContent"]["queueItem"], 7)
-        self.assertEqual(app._ci_backend.posts, ["/job/swarm-build/build"])
+        self.assertEqual(app.ci_backend.posts, ["/job/swarm-build/build"])
         self.assertEqual(self.audit.events[-1].outcome, "ok")
 
     def test_rerun_is_offered_only_to_a_runner_on_a_project_with_a_trigger_list(self):

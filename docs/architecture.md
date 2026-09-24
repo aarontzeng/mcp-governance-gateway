@@ -48,13 +48,14 @@ deliberately not MCP tools:
 
 | Module | Responsibility |
 |---|---|
-| Transport | MCP JSON-RPC over Streamable HTTP |
-| Auth | Validate the per-user bearer token; derive actor, project, roles |
-| Policy | Decide allow, deny, or require confirmation |
-| Confirmation | Two-step prepare/commit, single-use and argument-bound |
-| Registry | Build a role/project-specific tool list |
-| Adapters | Translate stable tools into backend API calls and re-enforce write policy |
-| Audit | Write structured event logs with redaction |
+| Transport (`server.py`) | MCP JSON-RPC over Streamable HTTP, plus the three non-MCP routes |
+| Auth (`auth.py`, `oidc.py`) | Validate the per-user bearer token; derive actor, project, roles |
+| Policy (`policy.py`) | Decide allow or deny per call, from the tool registry: family, role, tenant claim |
+| Confirmation (`confirm.py`, gate in `mcp.py`) | Two-step prepare/commit, single-use and argument-bound |
+| Registry (`tools/`) | One `ToolSpec` per tool -- schema, family, role, features -- read by policy, discovery and dispatch alike; one handler module per family |
+| Adapters (`*_backend.py`) | Translate stable tools into backend API calls and re-enforce write policy; HTTP through `http_client.py` |
+| Audit (`audit.py`) | Write structured event logs with redaction |
+| Hot-reloaded files (`hotfile.py`) | Change-detected reload with last-good and a `stale` flag, and the atomic write that produces such a file |
 | Secrets | Hold downstream credentials server-side |
 | Credential store | Per-user downstream keys, AES-256-GCM at rest, AAD-bound to the actor and backend (ADR-0009) |
 | Secret scan | Reject credential-shaped values on team-visible, append-only writes |

@@ -364,9 +364,9 @@ class GatewayTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         remote = _make_remote(tmp.name, "lint", {"wiki/x.md": "# X\n[Missing](missing.md)\n"})
-        self.app._docs_corpus = DocsCorpus({"team-a": {"url": remote, "branch": "master"}},
+        self.app.docs_corpus = DocsCorpus({"team-a": {"url": remote, "branch": "master"}},
                                            str(Path(tmp.name) / "clones"))
-        self.app._docs_review = None
+        self.app.docs_review = None
         self.assertIn("docs.lint", self._names(self.reader))
         result = self._call(self.reader, "docs.lint", {})["result"]["structuredContent"]
         self.assertEqual(result["findings"][0]["kind"], "broken_link")
@@ -386,14 +386,14 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.backend.calls, [])
 
     def _stage_body(self, body):
-        minted = self.app._asset_stage.mint_upload_url("1", "team-a", "t1", "content")
-        self.app._asset_stage.accept_upload(minted["url"].rsplit("/", 1)[1], body.encode(), "1", "team-a", "t1")
+        minted = self.app.asset_stage.mint_upload_url("1", "team-a", "t1", "content")
+        self.app.asset_stage.accept_upload(minted["url"].rsplit("/", 1)[1], body.encode(), "1", "team-a", "t1")
         return minted["stagedId"]
 
     def _enable_stage(self):
         from mcp_governance_gateway.docs_assets import AssetStage
         self.now = 0
-        self.app._asset_stage = AssetStage("https://gateway.example", clock=lambda: self.now)
+        self.app.asset_stage = AssetStage("https://gateway.example", clock=lambda: self.now)
 
     def test_staged_confirmation_lands_exact_body_and_consumes_it(self):
         self._enable_stage()
@@ -418,7 +418,7 @@ class GatewayTests(unittest.TestCase):
         from dataclasses import replace
         self._enable_stage()
         minted = self._call(self.writer, "docs.asset_stage_url", {})["result"]["structuredContent"]
-        self.app._asset_stage.accept_upload(minted["url"].rsplit("/", 1)[1], b"# Mine",
+        self.app.asset_stage.accept_upload(minted["url"].rsplit("/", 1)[1], b"# Mine",
                                            "1", "team-a", "t1")
         args = {"path": "wiki/x.md", "message": "m", "contentStaged": minted["stagedId"]}
         result = self._call(replace(self.writer, token_id="t2"), "docs.create", args)
@@ -474,7 +474,7 @@ class GatewayTests(unittest.TestCase):
         with patch.object(self.backend, "open_change", side_effect=ReviewBackendError("host unavailable", status=502)):
             result = self._call(self.writer, "docs.create", {**args, "confirm": pending["confirmationId"]})
         self.assertTrue(result["result"]["isError"])
-        self.assertEqual(self.app._asset_stage.peek(sid, "1", "team-a", "t1"), "# Retry me\n")
+        self.assertEqual(self.app.asset_stage.peek(sid, "1", "team-a", "t1"), "# Retry me\n")
         pending = self._call(self.writer, "docs.create", args)["result"]["structuredContent"]
         result = self._call(self.writer, "docs.create", {**args, "confirm": pending["confirmationId"]})
         self.assertEqual(result["result"]["structuredContent"]["status"], "proposed")

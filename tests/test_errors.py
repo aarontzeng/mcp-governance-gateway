@@ -42,10 +42,11 @@ class ErrorBoundaryTests(unittest.TestCase):
     def test_ci_not_enabled_is_a_ci_error_and_a_tool_error(self):
         # It was raised as a DocsBackendError; the client saw the same message,
         # but the class named the wrong backend to anyone catching by type.
+        from mcp_governance_gateway.tools import ci
         app = GatewayApp(memory_backend=_NullMemory(), audit_sink=ListAuditSink())
         principal = Principal(actor="1", project="p", roles=(), token_id="t")
         with self.assertRaises(CiBackendError) as caught:
-            app._call_ci_tool("ci.status", {}, principal, None)
+            ci.call(app, "ci.status", {}, principal, None)
         self.assertEqual(caught.exception.status, 404)
         response = app.handle_rpc(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "ci.status", "arguments": {}}},
