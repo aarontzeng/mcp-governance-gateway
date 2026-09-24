@@ -352,3 +352,36 @@ class IssueProjectRenameCompatTests(unittest.TestCase):
                                    "roles": [], "issue_project": ["nope"]}]}, fh)
         with self.assertRaises(ValueError):
             BearerTokenAuthenticator.from_files([(p, True)])
+
+
+class TokenIndexTests(unittest.TestCase):
+    """Lookup is by the bearer's digest now, not a scan of every token."""
+
+    def _auth(self, tokens):
+        principals = {t: Principal(actor=f"a-{t}", project="p", roles=(), token_id=t[:4]) for t in tokens}
+        return BearerTokenAuthenticator(principals)
+
+    def test_every_token_resolves_to_its_own_principal_and_nothing_else_does(self):
+        tokens = [f"tok-{i:04d}-{'x' * 20}" for i in range(500)]
+        auth = self._auth(tokens)
+        for t in tokens:
+            self.assertEqual(auth.authenticate_header(f"Bearer {t}").actor, f"a-{t}")
+        for bad in ("tok-0001", tokens[0] + "x", tokens[0].upper(), "Bearer", ""):
+            with self.subTest(bad=bad), self.assertRaises(AuthError):
+                auth.authenticate_header(f"Bearer {bad}")
+
+    def test_a_reload_rebuilds_the_index_so_a_revoked_token_stops_at_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "tokens.json"
+            path.write_text(json.dumps({"tokens": [
+                {"token": "keep-me", "actor": "k", "project": "p"},
+                {"token": "revoke-me", "actor": "r", "project": "p"},
+            ]}), encoding="utf-8")
+            auth = BearerTokenAuthenticator.from_files([(path, True)])
+            self.assertEqual(auth.authenticate_header("Bearer revoke-me").actor, "r")
+            path.write_text(json.dumps({"tokens": [{"token": "keep-me", "actor": "k", "project": "p"}]}),
+                            encoding="utf-8")
+            os.utime(path, (time.time() + 5, time.time() + 5))
+            with self.assertRaises(AuthError):
+                auth.authenticate_header("Bearer revoke-me")
+            self.assertEqual(auth.authenticate_header("Bearer keep-me").actor, "k")
