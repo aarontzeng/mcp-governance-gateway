@@ -22,7 +22,7 @@ import http.client
 import json
 import math
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 from urllib import error, parse, request
 
 from .errors import BackendError
@@ -34,7 +34,17 @@ class CiBackendError(BackendError):
     pass
 
 
-_MAX_LOG_FETCH_BYTES = 512_000     # bounded read of consoleText
+_MAX_LOG_FETCH_BYTES = 512_000     # bounded read of a JSON or text reply
+# ci.log streams the whole console through a rolling window this large and
+# keeps only the end, so the tail is the real end of the log whatever its
+# size. It used to read the FIRST 512 KB and take the last lines of that,
+# which on a long log handed back the wrong end -- exactly where the failure
+# an agent is looking for is not.
+_LOG_TAIL_WINDOW_BYTES = 512_000
+# A console longer than this is refused rather than mis-tailed: streaming it
+# holds a thread and a CI connection for its whole length, and a build that
+# printed more than this has a problem no tail will show.
+_MAX_LOG_SCAN_BYTES = 64 * 1024 * 1024
 _MAX_LOG_LINES = 1000
 _DEFAULT_LOG_LINES = 200
 _MAX_BUILD_COUNT = 50
@@ -280,17 +290,60 @@ class JenkinsHttpBackend:
             # Allowlist first: a job outside the project's list is "unknown"
             # whether or not it exists on the Jenkins instance.
             raise CiBackendError("unknown job for this project", status=404)
-        n = max(1, min(int(lines or _DEFAULT_LOG_LINES), _MAX_LOG_LINES))
-        raw = self._request_text(f"/job/{parse.quote(name, safe='')}/lastBuild/consoleText")
-        tail = raw.splitlines()[-n:]
+        n = max(1, min(_DEFAULT_LOG_LINES if lines is None else int(lines), _MAX_LOG_LINES))
+        window, total = self._tail_bytes(
+            f"/job/{parse.quote(name, safe='')}/lastBuild/consoleText", _LOG_TAIL_WINDOW_BYTES,
+        )
+        all_lines = window.decode("utf-8", errors="replace").splitlines()
+        cut = total > len(window)
+        if cut and all_lines:
+            # The window starts wherever the byte budget fell, mid-line and
+            # possibly mid-character; that fragment is not a line of the log.
+            all_lines = all_lines[1:]
         meta = self._job_status(name)
         return {
             "job": name,
             "build": meta.get("build"),
             "result": meta.get("result"),
-            "lines": tail,
-            "truncated": len(raw) >= _MAX_LOG_FETCH_BYTES,
+            "lines": all_lines[-n:],
+            "logBytes": total,
+            # True only when the caller asked for more history than the window
+            # holds: the lines returned are then the end of the log, but not
+            # all `lines` of it.
+            "truncated": cut and len(all_lines) < n,
         }
+
+    def _tail_bytes(self, path: str, keep: int) -> tuple[bytes, int]:
+        """The last `keep` bytes of a response body, and the body's full length.
+
+        Read as a stream so memory stays at `keep` whatever the log's size."""
+        window = bytearray()
+        total = 0
+        for chunk in self._stream(path):
+            total += len(chunk)
+            if total > _MAX_LOG_SCAN_BYTES:
+                raise CiBackendError(
+                    f"console log exceeds {_MAX_LOG_SCAN_BYTES} bytes; read it from the CI server directly",
+                    status=413,
+                )
+            window += chunk
+            if len(window) > keep:
+                del window[: len(window) - keep]
+        return bytes(window), total
+
+    def _stream(self, path: str) -> Iterator[bytes]:
+        """A response body in chunks. `_open` maps connection failures; a body
+        that breaks mid-stream is an HTTPException (IncompleteRead) or an
+        OSError, and either is the CI being unusable, not the caller."""
+        with self._open(path) as response:
+            try:
+                while True:
+                    chunk = response.read(STREAM_CHUNK)
+                    if not chunk:
+                        return
+                    yield chunk
+            except (OSError, http.client.HTTPException) as exc:
+                raise CiBackendError("CI unavailable") from exc
 
     def builds(self, job: str | None, context: RequestContext, count: int | None = None) -> dict[str, Any]:
         """Recent build history, newest first, for one job or for the whole project.

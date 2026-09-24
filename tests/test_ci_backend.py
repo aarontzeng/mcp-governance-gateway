@@ -36,6 +36,13 @@ class FakeJenkins(JenkinsHttpBackend):
             raise reply
         return "https://jenkins.example/queue/item/7/" if reply is self._NO_POST_REPLY else reply
 
+    STREAM_CHUNK_BYTES = 7   # small, so a tail crosses many chunk boundaries
+
+    def _stream(self, path: str):
+        body = self._fetch(path)
+        for start in range(0, len(body), self.STREAM_CHUNK_BYTES):
+            yield body[start:start + self.STREAM_CHUNK_BYTES]
+
     def _fetch(self, path: str) -> bytes:
         self.paths.append(path)
         for key, reply in self.replies.items():
@@ -329,6 +336,57 @@ class LogTests(unittest.TestCase):
         out = FakeJenkins().log("swarm-build", _ctx(), lines=5)
         self.assertEqual(out["lines"], ["line 496", "line 497", "line 498", "line 499", "line 500"])
         self.assertEqual(out["result"], "FAILURE")
+        self.assertFalse(out["truncated"])
+        self.assertEqual(out["logBytes"], len(b"\n".join(b"line %d" % i for i in range(1, 501))))
+
+    def test_the_tail_of_a_long_log_is_its_end_not_the_end_of_its_first_half_megabyte(self):
+        # 200k lines is ~2.3 MB, four times the window. The old read took the
+        # first 512 KB and tailed THAT, so this returned lines from the 40k range.
+        log = b"\n".join(b"line %d" % i for i in range(1, 200_001)) + b"\n"
+        out = FakeJenkins(replies={"/consoleText": log}).log("swarm-build", _ctx(), lines=3)
+        self.assertEqual(out["lines"], ["line 199998", "line 199999", "line 200000"])
+        self.assertEqual(out["logBytes"], len(log))
+        self.assertFalse(out["truncated"])   # the window held far more than 3 lines
+
+    def test_truncated_means_the_window_held_fewer_lines_than_asked_for(self):
+        # 3000 lines of 1000 bytes: the 512 KB window holds ~511 whole lines.
+        log = b"\n".join(b"%04d" % i + b"x" * 995 for i in range(1, 3001))
+        out = FakeJenkins(replies={"/consoleText": log}).log("swarm-build", _ctx(), lines=1000)
+        self.assertTrue(out["truncated"])
+        self.assertLess(len(out["lines"]), 1000)
+        self.assertEqual(out["lines"][-1][:4], "3000")
+        self.assertTrue(all(len(line) == 999 for line in out["lines"]), "a cut first line leaked through")
+        # ... and asking for what the window does hold is not truncated.
+        out = FakeJenkins(replies={"/consoleText": log}).log("swarm-build", _ctx(), lines=100)
+        self.assertFalse(out["truncated"])
+        self.assertEqual(len(out["lines"]), 100)
+
+    def test_a_console_beyond_the_scan_cap_is_refused_not_mis_tailed(self):
+        from unittest import mock
+        log = b"y" * 10_001
+        with mock.patch("mcp_governance_gateway.ci_backend._MAX_LOG_SCAN_BYTES", 10_000):
+            with self.assertRaises(CiBackendError) as cm:
+                FakeJenkins(replies={"/consoleText": log}).log("swarm-build", _ctx())
+        self.assertEqual(cm.exception.status, 413)
+
+    def test_a_body_that_breaks_mid_stream_is_ci_unavailable(self):
+        import http.client
+
+        class _Broken:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n):
+                raise http.client.IncompleteRead(b"partial")
+
+        backend = JenkinsHttpBackend("https://jenkins.example", "svc", "TOKEN", {"proj-a": ["swarm-build"]})
+        backend._open = lambda path: _Broken()  # type: ignore[method-assign]
+        with self.assertRaises(CiBackendError) as cm:
+            backend._tail_bytes("/x", 100)
+        self.assertIn("unavailable", str(cm.exception))
 
     def test_default_and_max_lines(self):
         out = FakeJenkins().log("swarm-build", _ctx())

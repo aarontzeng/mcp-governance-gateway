@@ -61,8 +61,11 @@ watches.
 `startedAt` is the ISO-8601 field to reason with; the raw Jenkins `timestamp`
 (epoch ms) is kept beside it because `ci.status` has emitted it since 0.1.0.
 
-Logs are size-capped (bounded 512KB fetch, tail only): console output can
-embed anything a build printed. These four tool calls share the per-user read
+Logs are read as a stream through a 512 KB rolling window, so `lines` is the
+real end of the console however long it is; `logBytes` is its full length and
+`truncated` is true only when the window held fewer lines than were asked for.
+A console over 64 MiB is refused (413) rather than mis-tailed. Console output
+can embed anything a build printed. These four tool calls share the per-user read
 quota and are audited like every other tool — the artifact **download** is a
 separate endpoint with its own limits and its own audit event, described below.
 

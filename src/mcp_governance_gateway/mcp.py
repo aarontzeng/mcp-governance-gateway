@@ -1132,7 +1132,11 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "ci.log",
-            "description": "Tail of the last build's console log for one CI job (read-only, size-capped).",
+            "description": (
+                "The end of the last build's console log for one CI job (read-only). The whole "
+                "console is streamed and only its last 512 KB kept, so the lines are the real tail; "
+                "`truncated` is true when you asked for more lines than that window holds."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
