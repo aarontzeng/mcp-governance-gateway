@@ -323,3 +323,35 @@ the host.
 - Refresh is per project: one project's slow clone or unreachable remote does not
   block another project's docs calls. Monitor snapshot age per project rather than
   a single global figure.
+
+## Process Memory: What Grows and What Reclaims It
+
+Everything below lives in the one process (see SECURITY.md, "One active
+instance"). Most of it is bounded by a TTL or a cap; the rows marked
+**restart** grow with the set of projects or people the instance has served
+and are reclaimed only when it restarts. None of them grows with request
+volume alone.
+
+| State | Bound | Reclaimed by |
+|---|---|---|
+| Pending confirmations (`confirm.py`) | 10,000 entries, 300 s each | expiry; oldest evicted at the cap |
+| Staged docs bodies (`docs_assets.py`) | 16 stages and 32 MiB per actor; upload URL 60 s, stage 3600 s | expiry, or consumption by a successful proposal |
+| Tracker vocabularies — statuses, trackers, priorities (`issue_backend.py`) | one set per instance | a 300 s TTL |
+| OIDC signing keys (`oidc.py`) | the IdP's key set | `OIDC_JWKS_TTL_SEC` (600 s default) |
+| Memory and enrollment rate-limit windows (`limits.py`, `internal_api.py`) | one entry per actor (and project) ever seen; each window prunes itself | **restart** — the keys stay, their contents do not |
+| Tracker project ids — Redmine and GitLab (`issue_backend.py`, `gitlab_backend.py`) | one entry per `issue_project` ever resolved | **restart** |
+| Docs snapshots and their refresh locks (`docs_backend.py`) | one per project ever served, each up to the corpus caps (64 MiB) | **restart**; a project removed from `DOCS_REPOS_FILE` keeps its snapshot in memory until then |
+| Docs clones on disk (`DOCS_CLONE_DIR`) | one directory per project **and url** | **nothing** — delete them yourself |
+
+Two of these are worth an operator's attention beyond their size:
+
+- **A tracker project id is cached with no expiry.** If a Redmine project's
+  identifier or a GitLab project's path is changed so that an `issue_project`
+  claim now names a different project, the instance keeps using the id it
+  resolved first until it restarts. Restart after renaming a tracker project a
+  token's `issue_project` points at.
+- **A retargeted docs project leaves its old clone behind.** The clone
+  directory is keyed by project and url, so changing a project's url starts a
+  new directory and the old one is never touched again. Remove directories
+  under `DOCS_CLONE_DIR` whose url no project maps to any more; the instance
+  does not need them, and deleting one it does need only costs a re-clone.

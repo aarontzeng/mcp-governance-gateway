@@ -19,7 +19,7 @@ from . import __version__
 from .audit import AuditEvent, AuditSink
 from .auth import Principal
 from .ci_backend import JenkinsHttpBackend
-from .confirm import ConfirmationStore
+from .confirm import ConfirmationBackend, ConfirmationStore
 from .docs_assets import AssetStage
 from .docs_backend import DocsCorpus
 from .docs_review import DocsReviewService
@@ -72,7 +72,7 @@ class GatewayApp:
         policy: Policy | None = None,
         memory_write_limiter: MemoryWriteLimiter | None = None,
         issue_backend: IssueBackend | None = None,
-        confirmation: ConfirmationStore | None = None,
+        confirmation: ConfirmationBackend | None = None,
         docs_corpus: DocsCorpus | None = None,
         ci_backend: JenkinsHttpBackend | None = None,
         docs_review: DocsReviewService | None = None,
@@ -90,7 +90,7 @@ class GatewayApp:
         self.write_limiter = memory_write_limiter or InMemoryMemoryWriteLimiter(MemoryLimitConfig())
         self._audit_sink = audit_sink
         self._policy = policy or Policy()
-        self._confirm = confirmation or ConfirmationStore()
+        self._confirm: ConfirmationBackend = confirmation or ConfirmationStore()
 
     # ------------------------------------------------------------ JSON-RPC
 

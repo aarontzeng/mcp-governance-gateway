@@ -7,9 +7,35 @@ import secrets
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
 from .auth import Principal
+
+
+class ConfirmationBackend(Protocol):
+    """Where pending confirmations live, as the gate in `mcp.py` uses them.
+
+    `ConfirmationStore` below keeps them in this process, which is why a second
+    gateway instance is a second enforcement point (SECURITY.md, "One active
+    instance"). A shared implementation -- the roadmap's "durable write outcomes
+    and shared state" -- is written against this, and must keep what the
+    in-process one guarantees, which `tests/test_confirm_contract.py` checks of
+    any implementation:
+
+    - `issue` binds a fresh, unguessable id to the full principal (actor,
+      project, token id, issue project), the tool, and the exact arguments;
+    - `verify` succeeds at most once per id (consume on success), and only for
+      that principal, tool and arguments, within the TTL;
+    - an id issued to a different principal or tool is indistinguishable from
+      one never issued, in the verdict and in the reason;
+    - `verify(..., provided=None)` is `(False, None)`: an ordinary first call.
+    """
+
+    def issue(self, principal: Principal, tool: str, args: dict[str, Any]) -> str: ...
+
+    def verify(
+        self, principal: Principal, tool: str, args: dict[str, Any], provided: Any,
+    ) -> tuple[bool, str | None]: ...
 
 
 class ConfirmationStore:
