@@ -25,8 +25,14 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib import error, parse, request
 
-from .issue_backend import IssueBackendError as CiBackendError  # same shape/semantics
+from .errors import BackendError
 from .memory_backend import RequestContext
+
+
+
+class CiBackendError(BackendError):
+    pass
+
 
 _MAX_LOG_FETCH_BYTES = 512_000     # bounded read of consoleText
 _MAX_LOG_LINES = 1000
@@ -549,6 +555,8 @@ class JenkinsHttpBackend:
 
     def _request_json(self, path: str) -> dict[str, Any]:
         raw = self._fetch(path)
+        if not raw.strip():
+            return {}   # an empty body is "nothing there", not invalid JSON
         try:
             decoded = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:

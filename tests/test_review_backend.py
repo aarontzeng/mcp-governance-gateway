@@ -186,6 +186,29 @@ class GitHubReviewBackendTests(unittest.TestCase):
         self.assertIn("changed", str(cm.exception).lower())
         self.assertEqual(len(backend.recorded), 3)
 
+    def test_a_ref_whose_object_is_not_an_object_is_a_review_error(self) -> None:
+        # `ref_data.get("object", {}).get("sha")` raised AttributeError -- past the
+        # error boundary, as a 500 -- when the host answered with a string there.
+        for odd in ("abc123", ["sha"], 7, None):
+            with self.subTest(odd=odd):
+                backend = FakeGitHub(
+                    replies={("GET", f"/repos/{self.spec.repo}/git/ref/heads/{self.spec.base_branch}"): {"object": odd}}
+                )
+                with self.assertRaises(ReviewBackendError) as cm:
+                    backend.open_change(self.spec, "first_doc.md", "c", "m", "tok", self.ctx)
+                self.assertIn("object.sha", str(cm.exception))
+
+    def test_an_empty_body_is_not_invalid_json(self) -> None:
+        # A 204, or a write the host acknowledges with nothing, used to surface
+        # as "review host returned invalid JSON"; every other adapter reads an
+        # empty body as an empty object.
+        backend = GitHubReviewBackend()
+        response = unittest.mock.MagicMock()
+        response.read.return_value = b""
+        response.__enter__.return_value = response
+        with unittest.mock.patch("urllib.request.urlopen", return_value=response):
+            self.assertEqual(backend._request(self.spec, "DELETE", "/path", "tok"), {})
+
     def test_step1_404_explains_corpus_has_no_commits_yet(self) -> None:
         # An empty corpus repo has no branch ref yet and returns 404 from step 1.
         # A plain "HTTP 404" would mislead callers into thinking the repo itself is missing.
@@ -349,11 +372,10 @@ class GitHubReviewBackendTests(unittest.TestCase):
                 backend._request(self.spec, "GET", "/path", "tok")
             self.assertIn("invalid json", str(cm.exception).lower())
 
-        # 3. Empty response
+        # 3. Empty response: "nothing there", as every other adapter reads it,
+        #    not invalid JSON (see test_an_empty_body_is_not_invalid_json).
         with unittest.mock.patch("urllib.request.urlopen", return_value=MockResponse(b"")):
-            with self.assertRaises(ReviewBackendError) as cm:
-                backend._request(self.spec, "GET", "/path", "tok")
-            self.assertIn("invalid json", str(cm.exception).lower())
+            self.assertEqual(backend._request(self.spec, "GET", "/path", "tok"), {})
 
     def test_get_change_reads_proposal_metadata(self) -> None:
         pr_payload = {

@@ -30,6 +30,7 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from .errors import BackendError
 from .memory_backend import ActorLabels, RequestContext, _display_actor
 from .review_backend import ReviewSpec, parse_review_spec
 
@@ -41,10 +42,8 @@ _HEADING_RE = re.compile(r"^#\s+(.+)$", re.M)
 _LINK_RE = re.compile(r"\[[^\]\n]*\]\(\s*<?([^\s)>]+)>?(?:\s+[^)]*)?\)")
 
 
-class DocsBackendError(Exception):
-    def __init__(self, message: str, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
+class DocsBackendError(BackendError):
+    pass
 
 
 def tokenize(text: str) -> list[str]:

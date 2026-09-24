@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .issue_backend import IssueBackendError
 from .memory_backend import RequestContext
 from .redmine_keystore import KeyState
 from .review_backend import ReviewBackendError, ReviewSpec, stamped
@@ -214,4 +213,4 @@ class DocsReviewService:
         return personal
 
 
-__all__ = ["DocsReviewService", "IssueBackendError", "KeyResolver"]
+__all__ = ["DocsReviewService", "KeyResolver", "ReviewBackendError"]

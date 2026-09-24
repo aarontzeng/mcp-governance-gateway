@@ -52,16 +52,18 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib import error, parse, request
 
-from .issue_backend import (
-    IssueBackendError as ReviewBackendError,  # same shape/semantics
-    _MAX_RESPONSE_BYTES,
-)
+from .errors import BackendError
+from .issue_backend import _MAX_RESPONSE_BYTES
 from .memory_backend import RequestContext
 
 # The attribution footer, in the shape `issue_backend` already stamps on notes.
 # Its presence is what tells a human reader that a comment came through the
 # gateway rather than from the person directly, so it is not decoration.
 FOOTER = "[via mcp-governance-gateway | actor={actor} | audit={request_id}]"
+
+
+class ReviewBackendError(BackendError):
+    pass
 
 _GITHUB_REPO_RE = re.compile(r"\A[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 # A GitLab project may be a numeric id or a namespaced path several levels deep.
@@ -281,6 +283,8 @@ class GitHubReviewBackend:
             raise ReviewBackendError("review host unavailable") from exc
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ReviewBackendError("review host response too large")
+        if not raw.strip():
+            return {}   # a 204, or a write the host acknowledges with nothing: not invalid JSON
         try:
             return json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -314,7 +318,8 @@ class GitHubReviewBackend:
                 ) from exc
             raise
 
-        base_head_sha = ref_data.get("object", {}).get("sha") if isinstance(ref_data, dict) else None
+        ref_object = ref_data.get("object") if isinstance(ref_data, dict) else None
+        base_head_sha = ref_object.get("sha") if isinstance(ref_object, dict) else None
         if not base_head_sha:
             raise ReviewBackendError("review host returned ref without object.sha")
 

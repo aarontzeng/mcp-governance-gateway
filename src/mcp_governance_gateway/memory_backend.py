@@ -8,16 +8,15 @@ from typing import Any
 from urllib import error, parse, request
 
 from .auth import Principal
+from .errors import BackendError
 
 _MAX_RESPONSE_BYTES = 2_000_000
 # Upper bound on list fetches before gateway filtering and pagination.
 _LIST_FETCH_MAX = 5_000
 
 
-class MemoryBackendError(Exception):
-    def __init__(self, message: str, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
+class MemoryBackendError(BackendError):
+    pass
 
 
 @dataclass(frozen=True)

@@ -11,12 +11,12 @@ from . import __version__
 from .audit import AuditEvent, AuditSink
 from .auth import Principal
 from .confirm import ConfirmationStore
-from .ci_backend import JenkinsHttpBackend
+from .ci_backend import CiBackendError, JenkinsHttpBackend
+from .errors import BackendError
 from .docs_backend import DocsBackendError, DocsCorpus
-from .docs_assets import AssetStageError
 from .issue_backend import IssueBackend, IssueBackendError
 from .limits import InMemoryMemoryWriteLimiter, MemoryLimitConfig, MemoryWriteLimiter
-from .memory_backend import MemoryBackend, MemoryBackendError, RequestContext
+from .memory_backend import MemoryBackend, RequestContext
 from .secret_scan import find_secret
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -240,7 +240,7 @@ class GatewayApp:
             denied = PolicyDecision("deny", str(exc))
             self._audit(name, principal, gateway_request_id, denied, "denied", start=start)
             return _error(request_id, -32003, str(exc))
-        except (MemoryBackendError, IssueBackendError, DocsBackendError, AssetStageError) as exc:
+        except BackendError as exc:
             backend_status = str(exc.status) if exc.status is not None else "error"
             self._audit(
                 name, principal, gateway_request_id, decision, "backend_error",
@@ -534,7 +534,7 @@ class GatewayApp:
         context: RequestContext,
     ) -> dict[str, Any]:
         if self._ci_backend is None:
-            raise DocsBackendError("CI is not enabled on this gateway", status=404)
+            raise CiBackendError("CI is not enabled on this gateway", status=404)
         # ci.rerun pays this too, unlike issues.create which takes no quota at
         # all. Deliberate, and the asymmetry is worth stating: a build trigger
         # spends a shared resource, so a bound on how fast one can be asked for

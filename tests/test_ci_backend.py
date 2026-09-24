@@ -318,6 +318,12 @@ class StatusTests(unittest.TestCase):
             FakeJenkins().status(_ctx(project="proj-b"))
 
 
+class EmptyBodyTests(unittest.TestCase):
+    def test_an_empty_json_body_reads_as_nothing_rather_than_invalid_json(self):
+        fake = FakeJenkins(replies={"/api/json": b""})
+        self.assertEqual(fake._request_json("/job/x/api/json"), {})
+
+
 class LogTests(unittest.TestCase):
     def test_log_tails_last_lines(self):
         out = FakeJenkins().log("swarm-build", _ctx(), lines=5)

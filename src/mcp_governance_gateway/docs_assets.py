@@ -16,6 +16,8 @@ import threading
 import time
 from typing import Callable, Iterator
 
+from .errors import BackendError
+
 MAX_ASSET_BYTES = 2 * 1024 * 1024
 URL_TTL_SEC = 60
 STAGE_TTL_SEC = 3600
@@ -23,10 +25,11 @@ MAX_STAGED_PER_USER = 16
 MAX_STAGED_BYTES_PER_USER = 32 * 1024 * 1024
 
 
-class AssetStageError(Exception):
+class AssetStageError(BackendError):
+    status: int
+
     def __init__(self, message: str, status: int = 400) -> None:
-        super().__init__(message)
-        self.status = status
+        super().__init__(message, status)
 
 
 @dataclass

@@ -9,13 +9,12 @@ from typing import Any, Callable
 from urllib import error, parse, request
 
 from .memory_backend import RequestContext
+from .errors import BackendError
 from .redmine_keystore import KeyState
 
 
-class IssueBackendError(Exception):
-    def __init__(self, message: str, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
+class IssueBackendError(BackendError):
+    pass
 
 
 # Status filter values Redmine takes verbatim, so they never need an id lookup.
