@@ -22,10 +22,27 @@ _ARGS = {"subject": "x"}
 
 
 class ConfirmationContract:
-    """Mix into a TestCase and define `make()`."""
+    """Mix into a TestCase and define `make()`. `FLOOD` must exceed whatever
+    total the implementation `make()` returns can hold."""
+
+    FLOOD = 600
 
     def make(self) -> ConfirmationBackend:
         raise NotImplementedError
+
+    def test_one_principal_flooding_prepares_does_not_evict_anothers(self: Any) -> None:
+        # A token holding a write role could prepare without limit and push every
+        # other tenant's pending confirmation out of a store shared by all of
+        # them: the victim then saw "unknown or already-used" and had to start
+        # over. A flood may only ever cost the flooder its own pending ids.
+        store = self.make()
+        victim = Principal(actor="v", project="other", roles=_ME.roles, token_id="tv", issue_project="98")
+        kept = store.issue(victim, "issues.create", _ARGS)
+        flooder_ids = [store.issue(_ME, "issues.create", {"subject": str(i)}) for i in range(self.FLOOD)]
+        self.assertEqual(store.verify(victim, "issues.create", _ARGS, kept), (True, None))
+        # ... and the flooder's newest prepare still works: the cost is its oldest.
+        self.assertEqual(store.verify(_ME, "issues.create", {"subject": str(self.FLOOD - 1)}, flooder_ids[-1]),
+                         (True, None))
 
     def test_an_issued_id_verifies_once(self: Any) -> None:
         store = self.make()
@@ -66,7 +83,57 @@ class ConfirmationContract:
 
 class InProcessStoreContractTests(ConfirmationContract, unittest.TestCase):
     def make(self) -> ConfirmationBackend:
-        return ConfirmationStore()
+        # A small total, so FLOOD exceeds it without ten thousand issues.
+        return ConfirmationStore(max_entries=500)
+
+
+class InProcessStoreCapTests(unittest.TestCase):
+    """The in-process store's own per-principal cap."""
+
+    def test_the_cap_is_per_principal_not_per_tool(self) -> None:
+        # Counted per (principal, tool), one token could hold the cap once per
+        # write tool -- eleven of them today.
+        store = ConfirmationStore(max_per_principal=4)
+        issued = []
+        for i in range(3):
+            for tool in ("issues.create", "issues.add_note", "ci.rerun"):
+                issued.append((tool, {"n": i}, store.issue(_ME, tool, {"n": i})))
+        live = [cid for tool, args, cid in issued if store.verify(_ME, tool, args, cid)[0]]
+        self.assertEqual(live, [cid for _tool, _args, cid in issued[-4:]], "the newest four, across tools")
+
+    def test_bookkeeping_empties_as_ids_are_consumed_or_expire(self) -> None:
+        now = [1000.0]
+        store = ConfirmationStore(ttl_sec=10, clock=lambda: now[0])
+        consumed = store.issue(_ME, "issues.create", _ARGS)
+        store.issue(_ME, "issues.create", {"subject": "y"})
+        store.verify(_ME, "issues.create", _ARGS, consumed)
+        now[0] += 11
+        store.issue(Principal(actor="z", project="p", roles=(), token_id="tz"), "issues.create", _ARGS)
+        # Only the one just issued remains, in both maps.
+        self.assertEqual(len(store._pending), 1)
+        self.assertEqual(sum(len(o) for o in store._owned.values()), 1)
+        self.assertEqual(len(store._owned), 1)
+
+    def test_a_cap_below_one_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            ConfirmationStore(max_per_principal=0)
+
+    def test_through_the_gateway_a_flooding_writer_cannot_cost_another_tenant_its_confirmation(self) -> None:
+        app = GatewayApp(memory_backend=FakeMemoryBackend(), audit_sink=ListAuditSink(),
+                         issue_backend=FakeIssueBackend(), confirmation=ConfirmationStore(max_entries=200))
+        victim = Principal(actor="v", project="other", roles=("issue_writer",), token_id="tv", issue_project="98")
+
+        def create(principal, arguments):
+            return app.handle_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                   "params": {"name": "issues.create", "arguments": arguments}},
+                                  principal)["result"]["structuredContent"]
+
+        pending = create(victim, {"subject": "mine"})
+        for i in range(300):
+            create(_ME, {"subject": f"flood {i}"})
+        done = create(victim, {"subject": "mine", "confirm": pending["confirmationId"]})
+        self.assertNotIn("confirmationRequired", done)
+        self.assertNotIn("confirmError", done)
 
 
 class _Recording:

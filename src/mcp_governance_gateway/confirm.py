@@ -6,6 +6,7 @@ import json
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -28,6 +29,8 @@ class ConfirmationBackend(Protocol):
       that principal, tool and arguments, within the TTL;
     - an id issued to a different principal or tool is indistinguishable from
       one never issued, in the verdict and in the reason;
+    - one principal issuing ids, however many, cannot displace another
+      principal's pending ones;
     - `verify(..., provided=None)` is `(False, None)`: an ordinary first call.
     """
 
@@ -57,17 +60,51 @@ class ConfirmationStore:
     """
 
     def __init__(
-        self, ttl_sec: int = 300, clock: Callable[[], float] | None = None, max_entries: int = 10_000
+        self,
+        ttl_sec: int = 300,
+        clock: Callable[[], float] | None = None,
+        max_entries: int = 10_000,
+        max_per_principal: int = 64,
     ) -> None:
+        if max_per_principal < 1:
+            raise ValueError("max_per_principal must be at least 1")
         self._ttl = ttl_sec
         self._clock = clock or time.time
         self._max_entries = max_entries
-        # nonce -> (identity_key, action_key, field_digests, expiry). identity_key is
-        # checked BEFORE anything else is allowed to differ in the response: a caller
-        # whose principal/tool don't match the entry must be indistinguishable from a
-        # caller who guessed a nonce that was never issued at all (see verify()).
-        self._pending: dict[str, tuple[str, str, dict[str, str], float]] = {}
+        # The total cap bounds memory; this one bounds what one principal can hold.
+        # Without it the store was one pool: preparing is not rate-limited, so one
+        # token with a write role could fill all 10,000 slots and evict every other
+        # tenant's pending confirmation. With it, a principal at its cap evicts its
+        # OWN oldest, and filling the store takes 10,000 / 64 = 157 principals at
+        # once. 64 is far above an honest client -- an agent confirms each write
+        # before the next, or prepares a batch of a few -- inside a 300 s TTL.
+        self._max_per_principal = max_per_principal
+        # nonce -> (identity_key, action_key, field_digests, expiry, owner_key).
+        # identity_key is checked BEFORE anything else is allowed to differ in the
+        # response: a caller whose principal/tool don't match the entry must be
+        # indistinguishable from a caller who guessed a nonce that was never issued
+        # at all (see verify()).
+        self._pending: dict[str, tuple[str, str, dict[str, str], float, str]] = {}
+        # owner_key -> that principal's pending nonces, oldest first.
+        self._owned: dict[str, OrderedDict[str, None]] = {}
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _owner_key(principal: Principal) -> str:
+        """The principal without the tool: the unit a cap is counted in. Counting
+        per identity_key would let one token hold the cap once per write tool."""
+        parts = [principal.actor, principal.project, principal.token_id, principal.issue_project or ""]
+        return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+    def _drop(self, nonce: str) -> None:
+        entry = self._pending.pop(nonce, None)
+        if entry is None:
+            return
+        owned = self._owned.get(entry[4])
+        if owned is not None:
+            owned.pop(nonce, None)
+            if not owned:
+                del self._owned[entry[4]]
 
     def _identity_key(self, principal: Principal, tool: str) -> str:
         parts = [principal.actor, principal.project, principal.token_id, principal.issue_project or "", tool]
@@ -108,23 +145,28 @@ class ConfirmationStore:
         return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
     def _prune(self, now: float) -> None:
-        for nonce in [n for n, (_, _, _, exp) in self._pending.items() if exp <= now]:
-            del self._pending[nonce]
+        for nonce in [n for n, entry in self._pending.items() if entry[3] <= now]:
+            self._drop(nonce)
 
     def issue(self, principal: Principal, tool: str, args: dict[str, Any]) -> str:
         now = self._clock()
+        owner = self._owner_key(principal)
         with self._lock:
             self._prune(now)
+            owned = self._owned.get(owner)
+            if owned is not None and len(owned) >= self._max_per_principal:
+                self._drop(next(iter(owned)))          # this principal's own oldest
             if len(self._pending) >= self._max_entries:
-                oldest = min(self._pending, key=lambda n: self._pending[n][3])
-                del self._pending[oldest]
+                self._drop(min(self._pending, key=lambda n: self._pending[n][3]))
             nonce = secrets.token_urlsafe(18)
             self._pending[nonce] = (
                 self._identity_key(principal, tool),
                 self._action_key(principal, tool, args),
                 self._field_digests(args),
                 now + self._ttl,
+                owner,
             )
+            self._owned.setdefault(owner, OrderedDict())[nonce] = None
             return nonce
 
     def verify(self, principal: Principal, tool: str, args: dict[str, Any], provided: Any) -> tuple[bool, str | None]:
@@ -152,11 +194,11 @@ class ConfirmationStore:
             entry = self._pending.get(provided)
             if entry is None:
                 return False, "unknown or already-used confirmationId"
-            identity_key, action_key, confirmed_fields, expiry = entry
+            identity_key, action_key, confirmed_fields, expiry, _owner = entry
             if not hmac.compare_digest(identity_key, self._identity_key(principal, tool)):
                 return False, "unknown or already-used confirmationId"
             if expiry <= self._clock():
-                del self._pending[provided]
+                self._drop(provided)
                 return False, f"confirmationId expired ({self._ttl}s TTL) — start over with a fresh call"
             if not hmac.compare_digest(action_key, self._action_key(principal, tool, args)):
                 now_fields = self._field_digests(args)
@@ -172,5 +214,5 @@ class ConfirmationStore:
                     "character-for-character (typographic quotes, dashes, non-breaking spaces): diff your two "
                     "payloads rather than retrying the same way."
                 )
-            del self._pending[provided]  # single-use: consume so the token cannot be replayed
+            self._drop(provided)  # single-use: consume so the token cannot be replayed
             return True, None

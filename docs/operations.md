@@ -334,7 +334,7 @@ volume alone.
 
 | State | Bound | Reclaimed by |
 |---|---|---|
-| Pending confirmations (`confirm.py`) | 10,000 entries, 300 s each | expiry; oldest evicted at the cap |
+| Pending confirmations (`confirm.py`) | 64 per principal and 10,000 in all, 300 s each | expiry; a principal at its bound evicts its own oldest, and the oldest overall goes at the total |
 | Staged docs bodies (`docs_assets.py`) | 16 stages and 32 MiB per actor; upload URL 60 s, stage 3600 s | expiry, or consumption by a successful proposal |
 | Tracker vocabularies — statuses, trackers, priorities (`issue_backend.py`) | one set per instance | a 300 s TTL |
 | OIDC signing keys (`oidc.py`) | the IdP's key set | `OIDC_JWKS_TTL_SEC` (600 s default) |

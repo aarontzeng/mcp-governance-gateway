@@ -148,6 +148,17 @@ escalation; what it means is that a leaked `confirmationId` is a *user*-level
 capability for its 300-second life rather than a credential-level one. Treat a
 confirmation id as you would the write it authorizes.
 
+**Pending confirmations are bounded per principal, and in total.** Preparing a
+write takes no quota, and through 0.3.0 the store's only bound was its total of
+10,000: one token with a write role could prepare that many and push every
+other tenant's pending confirmations out, each victim then seeing "unknown or
+already-used" and having to start over. A principal now holds at most 64
+pending confirmations and, at that bound, evicts its own oldest. What remains
+is the total: filling it takes 157 principals preparing at their bound at the
+same time, which is a coordinated insider rather than a single token. The cost
+is availability either way -- an evicted confirmation is re-prepared, and
+nothing is written without one.
+
 **One active instance.** Everything the gateway remembers between calls lives in
 the process. The full list, because "quotas" was doing too much work in an
 earlier version of this sentence:

@@ -8,6 +8,7 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- **One tenant could evict another's pending confirmations.** Preparing a write takes no quota and the confirmation store's only bound was its total of 10,000, so a token with a write role could fill it and push every other tenant's pending confirmations out ("unknown or already-used", start over). Each principal now holds at most 64 and, at that bound, evicts its own oldest; filling the total takes 157 principals at once. ADR-0003 and SECURITY.md record the bound.
 - `serverInfo.version` said 0.2.0 on a 0.3.0 gateway. The version is one literal now (`mcp_governance_gateway.__version__`, read by pyproject), and a test holds the newest CHANGELOG heading to it.
 - `ci.log` returned the last lines of the console's **first** 512 KB, so on a long log the tail was from the middle. The console is now streamed through a 512 KB window and only its end kept; `logBytes` reports the console's full length; `truncated` is true only when the window held fewer lines than were asked for; a console over 64 MiB is refused (413) rather than mis-tailed.
 - SIGTERM (what a container runtime sends on stop) now unwinds `serve_forever` through the same cleanup as Ctrl-C instead of killing the process mid-request.

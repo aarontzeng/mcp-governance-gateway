@@ -36,6 +36,11 @@ other sensitive values.
 - Only non-destructive writes can be confirmation-eligible.
 - Confirmation ids must be short-lived and bound to actor, project, tool,
   target resource, normalized arguments, and request id.
+- Pending confirmations are bounded **per principal**, not only in total.
+  Preparing takes no quota, so with a total bound alone one caller holding a
+  write role could evict every other tenant's pending confirmations; a caller
+  at its own bound evicts its own oldest instead. (Added after review; the
+  store had a total bound only through 0.3.0.)
 - Clients without elicitation can still operate through prepare/commit tools.
 - Truly dangerous operations need a separate product and security review before
   they can be enabled.
