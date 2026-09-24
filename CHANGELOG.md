@@ -4,6 +4,33 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- `serverInfo.version` said 0.2.0 on a 0.3.0 gateway. The version is one literal now (`mcp_governance_gateway.__version__`, read by pyproject), and a test holds the newest CHANGELOG heading to it.
+- `ci.log` returned the last lines of the console's **first** 512 KB, so on a long log the tail was from the middle. The console is now streamed through a 512 KB window and only its end kept; `logBytes` reports the console's full length; `truncated` is true only when the window held fewer lines than were asked for; a console over 64 MiB is refused (413) rather than mis-tailed.
+- SIGTERM (what a container runtime sends on stop) now unwinds `serve_forever` through the same cleanup as Ctrl-C instead of killing the process mid-request.
+- A review host answering a write with an empty body (204) was reported as "invalid JSON"; an empty body is an empty object, as every other adapter already read it. A ref reply whose `object` was not an object raised past the error boundary.
+- A docs refresh whose fetch brought no new commit re-read every blob, replayed the whole log and rebuilt the index; it now only moves the freshness stamp.
+
+### Changed
+
+- **Credential enrollment names its backend.** Audit events are `credentials.set` / `credentials.clear` (were `redmine.key.set` / `redmine.key.clear` on every deployment, GitLab included); refusals name the deployment's tracker; the enrollment response and `status` carry `login` beside `redmineLogin`, which deployed enrollment pages still read. The store class is `CredentialStore` (`RedmineKeyStore` remains an alias); the `REDMINE_KEYSTORE_*` variables are unchanged.
+- **Diagnostics go through `logging` to stderr**, each line with a level and the module that spoke. The "listening on" lines no longer go to stdout, which is now the audit stream's alone.
+- **Unrouted paths answer 404 for every method** (an unrouted GET or DELETE used to answer 405); a served path asked for with a method it does not take answers 405, as `GET /mcp` always has.
+- A CI JSON or text reply over 512 KB is refused ("CI response too large") instead of being cut mid-body and reported as invalid JSON.
+- A corrupt actor-labels file is logged, like every other hot-reloaded file, instead of being kept silently.
+
+### Internal
+
+- Every adapter error subclasses `errors.BackendError`; `CiBackendError` and `ReviewBackendError` are real classes rather than aliases of the tracker's.
+- `hotfile.ReloadingFile` replaces five change-detected reload loops with one (last-good, logged and throttled, `stale`, reloads serialized); the credential store's read path is now under that lock. `hotfile.atomic_write_json` is the one atomic writer for the token store and the credential store.
+- `http_client.JsonHttpClient` replaces five copies of the urlopen / error-mapping / body-cap / decode path.
+- `mcp.py` is split: `tools/` holds one `ToolSpec` per tool beside its family's handler, `policy.py` derives its decision from the spec, and `tools/list` filters the same records; a test walks every roles × tenant × features combination and holds discovery to policy.
+- `server.py` routes from one table, builds each backend in its own factory, and streams artifacts from `artifact_route.py`.
+- `tests/test_phase1_mcp.py` (3100 lines) is seven files named for what they cover; ruff (correctness rules) and mypy over all of `src` run in CI.
+
 ## [0.3.0] — 2026-09-11
 
 ### Docs corpus

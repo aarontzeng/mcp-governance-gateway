@@ -48,7 +48,7 @@ deliberately not MCP tools:
 
 | Module | Responsibility |
 |---|---|
-| Transport (`server.py`) | MCP JSON-RPC over Streamable HTTP, plus the three non-MCP routes |
+| Transport (`server.py`, `artifact_route.py`) | MCP JSON-RPC over Streamable HTTP, plus the three non-MCP routes, as one route table; the artifact stream in its own module |
 | Auth (`auth.py`, `oidc.py`) | Validate the per-user bearer token; derive actor, project, roles |
 | Policy (`policy.py`) | Decide allow or deny per call, from the tool registry: family, role, tenant claim |
 | Confirmation (`confirm.py`, gate in `mcp.py`) | Two-step prepare/commit, single-use and argument-bound |
