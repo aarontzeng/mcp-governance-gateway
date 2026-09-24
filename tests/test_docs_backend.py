@@ -642,6 +642,29 @@ class DocsCorpusTests(unittest.TestCase):
         out = self.corpus.search("brand-new-keyword", 5, _ctx("proj-a"))
         self.assertEqual(out["results"][0]["path"], "raw/reports/new.md")
 
+    def test_a_refresh_at_the_same_commit_reuses_the_snapshot(self):
+        # pull_interval_sec=0.0, so every call fetches. A fetch that brings no new
+        # commit must not re-read every blob and replay the log: the served
+        # documents and index are the ones already built, only the stamp moves.
+        first = self.corpus.get("wiki/index.md", _ctx("proj-a"))
+        loads: list[str] = []
+        original = self.corpus._load_docs
+        self.corpus._load_docs = lambda dest, commit: loads.append(commit) or original(dest, commit)
+        before = self.corpus._snapshots["proj-a"]
+        self.assertEqual(self.corpus.get("wiki/index.md", _ctx("proj-a"))["sha"], first["sha"])
+        after = self.corpus._snapshots["proj-a"]
+        self.assertEqual(loads, [])
+        self.assertIs(after.docs, before.docs)
+        self.assertGreaterEqual(after.refreshed_at, before.refreshed_at)
+        # ... and a new commit still gets a full rebuild.
+        work = str(Path(self.tmp) / "proj-a-docs-work")
+        _write_files(work, {"wiki/index.md": "# Index\n\nrewritten\n"})
+        _sh(work, "git", "add", "-A")
+        _sh(work, "git", "commit", "-qm", "rewrite index")
+        _sh(work, "git", "push", "-q", "origin", "master")
+        self.assertIn("rewritten", self.corpus.get("wiki/index.md", _ctx("proj-a"))["text"])
+        self.assertEqual(len(loads), 1)
+
 
 class _NullMemory(MemoryBackend):
     def search(self, query, limit, context):  # pragma: no cover - unused

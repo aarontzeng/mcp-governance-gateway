@@ -511,6 +511,16 @@ class DocsCorpus:
                 self._git(dest, "fetch", "origin", branch)
             self._git(dest, "reset", "--hard", "FETCH_HEAD")
         head = self._git(dest, "rev-parse", "HEAD").strip()
+        with self._snap_lock:
+            previous = self._snapshots.get(project)
+        if previous is not None and previous.head == head and previous.spec == spec.fingerprint:
+            # The fetch brought nothing new. Reading every blob again, replaying
+            # the whole log for provenance and rebuilding the index would produce
+            # a snapshot identical to the one being served, so only the freshness
+            # stamp moves -- which is most refreshes, since a docs corpus changes
+            # far less often than the pull interval elapses.
+            return _Snapshot(head=head, docs=previous.docs, index=previous.index,
+                             refreshed_at=time.monotonic(), spec=spec.fingerprint)
         docs = self._load_docs(dest, head)
         return _Snapshot(
             head=head, docs=docs, index=_Bm25Index(list(docs.values())),

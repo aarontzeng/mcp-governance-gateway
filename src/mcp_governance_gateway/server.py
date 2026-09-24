@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 import re
+import signal
 import sys
 import threading
 import time
@@ -679,6 +680,23 @@ def build_admin_server(settings: Settings, main_server: GatewayHTTPServer) -> Ga
     return admin
 
 
+class ShutdownRequested(Exception):
+    """Raised in the main thread by the SIGTERM handler, so `serve_forever`
+    unwinds through the same cleanup as Ctrl-C."""
+
+
+def _request_shutdown(signum: int, frame: Any) -> None:
+    raise ShutdownRequested(signum)
+
+
+def install_shutdown_signal() -> None:
+    """SIGTERM is what a container runtime sends on stop. Left to the default
+    disposition it kills the process mid-request: no `server_close`, and a
+    keep-alive client sees a reset rather than a refused connection. Raising
+    into the main thread lets `main` run the same `finally` as an interrupt."""
+    signal.signal(signal.SIGTERM, _request_shutdown)
+
+
 def main() -> None:
     settings = Settings.from_env()
     if not _is_loopback_host(settings.host):
@@ -703,9 +721,10 @@ def main() -> None:
         print(f"admin (credential enrollment) listening on {settings.admin_host}:{settings.admin_port}",
               flush=True)
     print(f"mcp-governance-gateway listening on {settings.host}:{settings.port}", flush=True)
+    install_shutdown_signal()
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ShutdownRequested):
         pass
     finally:
         server.server_close()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-governance-gateway"
-version = "0.3.0"
+dynamic = ["version"]
 description = "A governance and multi-tenancy gateway that fronts backends (agentmemory, issue trackers, a docs corpus, CI) behind the Model Context Protocol, with per-tenant isolation, confirmation-gated writes, and an audit trail."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -37,6 +37,10 @@ mcpgw-admin = "mcp_governance_gateway.admin_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+# One place to bump: mcp_governance_gateway/__init__.py (see the comment there).
+version = { attr = "mcp_governance_gateway.__version__" }
 
 [tool.pytest.ini_options]
 # So a bare `python -m pytest` works from a clone without an editable install.
