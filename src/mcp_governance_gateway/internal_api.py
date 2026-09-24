@@ -9,7 +9,7 @@ from .audit import AuditEvent, AuditSink
 from .auth import Principal
 from .issue_backend import IssueBackend, IssueBackendError
 from .memory_backend import RequestContext
-from .redmine_keystore import KeyState, KeyStoreError, RedmineKeyStore
+from .redmine_keystore import CredentialStore, KeyState, KeyStoreError
 
 
 def _norm_email(value: object) -> str:
@@ -46,13 +46,19 @@ class InternalApi:
     strictly on that token's actor (never a client-supplied identity, and the
     identity-propagation override is deliberately NOT applied on this path). Writes
     are audited and rate-limited. Even if the front gateway ever exposed this path,
-    a caller could still only manage *their own* key with a Redmine key that
-    validates as *their own* email.
+    a caller could still only manage *their own* key with a credential that
+    validates as *their own* email on the deployment's tracker.
+
+    The audit events are ``credentials.set`` / ``credentials.clear`` -- they were
+    ``redmine.key.*`` until 0.3.x, which misnamed every GitLab enrollment.
     """
+
+    # How the deployment's tracker is named in messages a person reads.
+    _LABELS = {"redmine": "Redmine", "gitlab": "GitLab"}
 
     def __init__(
         self,
-        keystore: RedmineKeyStore | None,
+        keystore: CredentialStore | None,
         issue_backend: IssueBackend | None,
         audit_sink: AuditSink,
         writes_per_minute: int = 10,
@@ -65,6 +71,7 @@ class InternalApi:
         # Which issue backend this deployment runs (ADR-0013): enrolled credentials
         # are bound to it in the store, and status/my-issues read the same slot.
         self._backend_name = backend_name
+        self._label = self._LABELS.get(backend_name, backend_name)
         self._limiter = _ActorRateLimiter(writes_per_minute)
         self._read_limiter = _ActorRateLimiter(reads_per_minute)
 
@@ -98,10 +105,10 @@ class InternalApi:
         if len(plaintext) > 256:
             return 400, {"error": "key too long"}
         if not self._limiter.allow(principal.actor):
-            self._emit(principal, "redmine.key.set", "rate_limited")
+            self._emit(principal, "credentials.set", "rate_limited")
             return 429, {"error": "too many attempts, try again shortly"}
         if self._keystore.degraded:
-            self._emit(principal, "redmine.key.set", "degraded", "keystore master key unavailable")
+            self._emit(principal, "credentials.set", "degraded", "keystore master key unavailable")
             return 503, {"error": "key store unavailable"}
         if self._issues is None:
             return 503, {"error": "issue backend not configured"}
@@ -109,26 +116,27 @@ class InternalApi:
         try:
             user = self._issues.verify_key(plaintext)
         except IssueBackendError:
-            self._emit(principal, "redmine.key.set", "invalid_key")
-            return 400, {"error": "Redmine key invalid or Redmine unreachable"}
+            self._emit(principal, "credentials.set", "invalid_key")
+            return 400, {"error": f"{self._label} credential invalid or {self._label} unreachable"}
         want = _norm_email(principal.email)
         got = _norm_email(user.get("mail"))
         if not want or not got or want != got:
-            self._emit(principal, "redmine.key.set", "identity_mismatch")
-            return 403, {"error": "this key belongs to a different Redmine user"}
+            self._emit(principal, "credentials.set", "identity_mismatch")
+            return 403, {"error": f"this credential belongs to a different {self._label} user"}
         try:
             self._keystore.set(principal.actor, plaintext, user.get("login"), backend=self._backend_name)
         except KeyStoreError:
-            self._emit(principal, "redmine.key.set", "store_error")
+            self._emit(principal, "credentials.set", "store_error")
             return 503, {"error": "key store unavailable"}
-        self._emit(principal, "redmine.key.set", "ok", resource_id=user.get("login"))
-        return 200, {"ok": True, "redmineLogin": user.get("login")}
+        self._emit(principal, "credentials.set", "ok", resource_id=user.get("login"))
+        # `redmineLogin` stays beside `login`: deployed enrollment pages read it.
+        return 200, {"ok": True, "login": user.get("login"), "redmineLogin": user.get("login")}
 
     def clear_key(self, principal: Principal) -> tuple[int, dict]:
         if self._keystore is None:
             return 404, {"error": "personal key store not configured"}
         cleared = self._keystore.clear(principal.actor, backend=self._backend_name)
-        self._emit(principal, "redmine.key.clear", "ok" if cleared else "noop")
+        self._emit(principal, "credentials.clear", "ok" if cleared else "noop")
         return 200, {"ok": True, "cleared": cleared}
 
     def my_issues(self, principal: Principal) -> tuple[int, dict]:

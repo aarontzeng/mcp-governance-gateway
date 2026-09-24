@@ -59,7 +59,7 @@ def load_master_keys(path: str | Path) -> tuple[str | None, dict[str, bytes]]:
         mode = p.stat().st_mode
         if mode & 0o077:  # group/other can read this — the master key is the crown jewel
             print(
-                f"WARNING: redmine keystore master key {path} is group/other-accessible "
+                f"WARNING: credential store master key {path} is group/other-accessible "
                 f"(mode {oct(mode & 0o777)}); it should be 0400.",
                 file=sys.stderr,
                 flush=True,
@@ -86,7 +86,7 @@ def load_master_keys(path: str | Path) -> tuple[str | None, dict[str, bytes]]:
     return active, keys
 
 
-class RedmineKeyStore:
+class CredentialStore:
     """Per-user downstream credentials, encrypted at rest (AES-256-GCM).
 
     Indexed by ``(actor, backend)``: an actor may hold a Redmine API key and a
@@ -105,8 +105,10 @@ class RedmineKeyStore:
     Owned by the adapter: a single UID reads and writes it, which is why the file
     is 0600 and there is no cross-UID setgid dance.
 
-    The name is historical -- it served only Redmine once. Renaming the module is
-    a separate change from making it hold several backends.
+    The MODULE name is historical -- it served only Redmine once -- and stays,
+    as do the ``REDMINE_KEYSTORE_*`` variables that point at it: a rename there
+    would break every deployment for a cosmetic gain. The class is named for
+    what it holds; ``RedmineKeyStore`` remains as an alias for importers.
     """
 
     def __init__(
@@ -227,13 +229,16 @@ class RedmineKeyStore:
         return {
             "hasKey": state is KeyState.OK,
             "state": state.value,
+            "login": rec.get("login") or rec.get("redmine_login"),
+            # The old key stays: it is what every deployed enrollment page reads,
+            # for the same reason /internal/redmine-key is still routed.
             "redmineLogin": rec.get("login") or rec.get("redmine_login"),
             "degraded": self.degraded,
         }
 
     # --- write path ------------------------------------------------------
 
-    def set(self, actor: str, plaintext: str, redmine_login: str | None, backend: str = "redmine") -> None:
+    def set(self, actor: str, plaintext: str, login: str | None, backend: str = "redmine") -> None:
         if self.degraded:
             raise KeyStoreError("keystore master key unavailable")
         master = self._master_keys[self._active_key_id]  # type: ignore[index]
@@ -246,8 +251,8 @@ class RedmineKeyStore:
             "ct": _b64e(nonce + ct),
             "key_id": self._active_key_id,
             "backend": backend,
-            "login": redmine_login,
-            "redmine_login": redmine_login,  # rollback compat: old adapters read this name
+            "login": login,
+            "redmine_login": login,  # rollback compat: old adapters read this name
             "updated_at": _utc_now(),
         }
         with self._lock:
@@ -320,3 +325,7 @@ class RedmineKeyStore:
             raise
         self._records = records
         self._sig = self._current_sig()
+
+
+# Importers written against the old class name.
+RedmineKeyStore = CredentialStore

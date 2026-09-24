@@ -210,7 +210,7 @@ class StageConfigurationTests(unittest.TestCase):
               patch("mcp_governance_gateway.server.GatewayApp") as app,
               patch("mcp_governance_gateway.server.DocsCorpus"),
               patch("mcp_governance_gateway.server.load_docs_repos", return_value={}),
-              patch("mcp_governance_gateway.server.RedmineKeyStore", return_value=SimpleNamespace(degraded=False, get=lambda *a, **k: None)),
+              patch("mcp_governance_gateway.server.CredentialStore", return_value=SimpleNamespace(degraded=False, get=lambda *a, **k: None)),
               patch("mcp_governance_gateway.server.request.install_opener")):
             server = build_server(settings)
             self.assertIsInstance(server.asset_stage, AssetStage)

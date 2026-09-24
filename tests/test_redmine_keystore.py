@@ -279,8 +279,27 @@ class InternalApiTests(unittest.TestCase):
     def test_set_key_email_match_ok(self):
         status, payload = self.api.set_key(self._p(), "PERSONAL")
         self.assertEqual(status, 200)
-        self.assertEqual(payload["redmineLogin"], "jdoe")
+        self.assertEqual(payload["login"], "jdoe")
+        self.assertEqual(payload["redmineLogin"], "jdoe")   # what deployed enrollment pages read
         self.assertIs(self.ks.get(_ACTOR)[0], KeyState.OK)
+        self.assertEqual(self.ks.status(_ACTOR)["login"], "jdoe")
+
+    def test_enrollment_is_audited_and_worded_by_the_deployments_tracker(self):
+        # Every event said `redmine.key.*` and every refusal said "Redmine",
+        # whichever tracker the deployment ran.
+        self.api.set_key(self._p(), "PERSONAL")
+        self.api.clear_key(self._p())
+        self.assertEqual([e.tool for e in self.audit.events], ["credentials.set", "credentials.clear"])
+        gitlab = InternalApi(self.ks, self.backend, self.audit, backend_name="gitlab")
+        self.backend._request = lambda *a, **k: (_ for _ in ()).throw(IssueBackendError("HTTP 401", status=401))
+        status, payload = gitlab.set_key(self._p(), "BAD")
+        self.assertEqual(status, 400)
+        self.assertIn("GitLab", payload["error"])
+        self.assertNotIn("Redmine", payload["error"])
+
+    def test_the_old_class_name_still_imports(self):
+        from mcp_governance_gateway.redmine_keystore import CredentialStore
+        self.assertIs(RedmineKeyStore, CredentialStore)
 
     def test_set_key_email_mismatch_rejected(self):
         status, payload = self.api.set_key(self._p(email="someone-else@example.com"), "PERSONAL")

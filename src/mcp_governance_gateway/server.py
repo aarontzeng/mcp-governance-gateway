@@ -36,7 +36,7 @@ from .issue_backend import RedmineHttpBackend
 from .limits import InMemoryMemoryWriteLimiter, MemoryLimitConfig
 from .mcp import GatewayApp
 from .memory_backend import ActorLabels, HttpMemoryBackend, RequestContext
-from .redmine_keystore import RedmineKeyStore, load_master_keys
+from .redmine_keystore import CredentialStore, load_master_keys
 
 
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -76,7 +76,7 @@ class GatewayHTTPServer(ThreadingHTTPServer):
     identity_verifier: IdentityVerifier
     allowed_origins: tuple[str, ...]
     internal_api: InternalApi | None = None
-    keystore: RedmineKeyStore | None = None
+    keystore: CredentialStore | None = None
     ci_backend: JenkinsHttpBackend | None = None  # for the /ci/artifact download route
     asset_stage: AssetStage | None = None
     audit_sink: AuditSink | None = None            # artifact transfers are audited here
@@ -541,10 +541,10 @@ def build_server(settings: Settings) -> GatewayHTTPServer:
             if settings.redmine_keystore_master_file
             else (None, {})
         )
-        keystore = RedmineKeyStore(settings.redmine_keystore_file, active_key_id=active, master_keys=master_keys)
+        keystore = CredentialStore(settings.redmine_keystore_file, active_key_id=active, master_keys=master_keys)
         if keystore.degraded:
             print(
-                "WARNING: redmine keystore is DEGRADED (master key unavailable) — per-user "
+                "WARNING: credential store is DEGRADED (master key unavailable) — per-user "
                 "attribution is disabled; issue writes use the shared key (optional mode) or "
                 "fail (enforced mode). Fix REDMINE_KEYSTORE_MASTER_FILE.",
                 file=sys.stderr,
