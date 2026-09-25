@@ -209,6 +209,10 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             try:
                 body = self._read_json()
             except ValueError as exc:
+                # Refused before the body was read (bad or over-size length): on a
+                # keep-alive connection those bytes would be parsed as the next
+                # request, so close it.
+                self.close_connection = True
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             if not isinstance(body, dict):
@@ -278,6 +282,10 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             try:
                 body = self._read_json()
             except ValueError as exc:
+                # Refused before the body was read (bad or over-size length): on a
+                # keep-alive connection those bytes would be parsed as the next
+                # request, so close it.
+                self.close_connection = True
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             if not isinstance(body, dict):
@@ -341,6 +349,10 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:
+                # A refusal that closes must say so, or the client keeps the
+                # connection for its next request and finds it gone.
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
 
@@ -612,11 +624,14 @@ def configure_logging(level: int = logging.INFO) -> None:
     """Diagnostics to stderr, one line each, with a level and the module that
     spoke. stdout is the audit stream's alone: the "listening on" line used to
     go there and sat between two JSON audit records."""
+    package = logging.getLogger("mcp_governance_gateway")
+    package.setLevel(level)
+    if package.handlers:
+        return   # a second main() in one process must not double every line
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    package = logging.getLogger("mcp_governance_gateway")
     package.addHandler(handler)
-    package.setLevel(level)
+    package.propagate = False   # nor should an embedding process's root handler repeat it
 
 
 def main() -> None:

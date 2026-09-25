@@ -99,7 +99,11 @@ class ActorLabels:
 
     def _parse(self) -> dict[str, str]:
         assert self._path is not None
-        data = json.loads(self._path.read_text(encoding="utf-8"))
+        try:
+            text = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}   # no runtime store yet: nobody to label, and nothing wrong
+        data = json.loads(text)
         out: dict[str, str] = {}
         for t in data.get("tokens", []):
             if not isinstance(t, dict):
@@ -137,7 +141,6 @@ class HttpMemoryBackend(MemoryBackend):
         actor_labels: ActorLabels | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._backend_token = backend_token
         self._http = JsonHttpClient(
             self._base_url, error_cls=MemoryBackendError, label="memory backend", timeout_sec=timeout_sec,
             headers={"Authorization": f"Bearer {backend_token}"} if backend_token else None,
@@ -147,7 +150,6 @@ class HttpMemoryBackend(MemoryBackend):
         self._list_path = _normalize_path(list_path)
         self._lesson_path = _normalize_path(lesson_path)
         self._action_path = _normalize_path(action_path)
-        self._timeout_sec = timeout_sec
         self._actor_labels = actor_labels
 
     def _labels(self) -> dict[str, str]:

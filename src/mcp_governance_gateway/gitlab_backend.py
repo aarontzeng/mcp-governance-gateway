@@ -76,7 +76,6 @@ class GitLabHttpBackend(IssueBackend):
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token  # shared token: non-authorship reads + optional fallback
-        self._timeout_sec = timeout_sec
         self._http = JsonHttpClient(f"{self._base_url}/api/v4", error_cls=IssueBackendError,
                                     label="issue tracker", timeout_sec=timeout_sec)
         self._portal_url = (credential_portal_url or "").rstrip("/") or None

@@ -97,6 +97,22 @@ class ReloadingFileTests(unittest.TestCase):
         store.refresh()
         self.assertEqual(self.parses, 1, "the construction-time parse stamped the signature")
 
+    def test_load_now_sees_a_write_that_lands_during_the_parse(self):
+        # The signature is taken before the parse: an atomic replace landing
+        # while the parse runs differs from it and is reloaded next time,
+        # rather than being recorded as already seen.
+        def parse_then_replace(previous):
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            atomic_write_json(self.path, {"v": "landed during parse"})
+            return value
+
+        store: ReloadingFile[dict] = ReloadingFile(self.path, parse_then_replace, what="value", initial={},
+                                                  load_now=True)
+        self.assertEqual(store.value, {"v": 1})
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"v": "landed during parse"})
+        store._parse = lambda previous: json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(store.current, {"v": "landed during parse"})
+
     def test_publish_records_a_write_of_our_own_without_re_reading_it(self):
         store = self._store()
         store.refresh()

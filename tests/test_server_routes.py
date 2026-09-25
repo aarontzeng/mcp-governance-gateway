@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -536,3 +537,48 @@ class HttpServerKeepAliveTests(unittest.TestCase):
         finally:
             srv.shutdown()
             Path(tf.name).unlink()
+
+
+class RefusedBodyTests(unittest.TestCase):
+    def test_an_oversize_post_closes_the_connection_instead_of_desynchronising_it(self):
+        # The body is refused before it is read; left open, its bytes would be
+        # parsed as the next request on this keep-alive connection.
+        from mcp_governance_gateway.auth import BearerTokenAuthenticator, IdentityVerifier, Principal
+        from mcp_governance_gateway.server import GatewayHTTPServer, make_handler
+        srv = GatewayHTTPServer(("127.0.0.1", 0), make_handler())
+        srv.app = None
+        srv.authenticator = BearerTokenAuthenticator({"t": Principal(actor="a", project="p", roles=(), token_id="i")})
+        srv.identity_verifier = IdentityVerifier(secret="")
+        srv.allowed_origins = ()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+            conn.putrequest("POST", "/mcp")
+            conn.putheader("Authorization", "Bearer t")
+            conn.putheader("Content-Length", str(3_000_000))
+            conn.endheaders()
+            response = conn.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertTrue(response.will_close)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
+class LoggingSetupTests(unittest.TestCase):
+    def test_configure_logging_twice_installs_one_handler(self):
+        import logging
+
+        from mcp_governance_gateway.server import configure_logging
+        package = logging.getLogger("mcp_governance_gateway")
+        saved = list(package.handlers), package.propagate, package.level
+        package.handlers.clear()
+        try:
+            configure_logging()
+            configure_logging()
+            self.assertEqual(len(package.handlers), 1)
+            self.assertFalse(package.propagate)
+        finally:
+            package.handlers[:] = saved[0]
+            package.propagate = saved[1]
+            package.setLevel(saved[2])

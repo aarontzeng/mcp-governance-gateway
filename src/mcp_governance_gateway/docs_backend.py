@@ -210,7 +210,6 @@ class DocsCorpus:
         # Three narrow locks rather than one wide one. The old single lock was held
         # across clone/fetch/reset, so every project's docs calls queued behind one
         # project's remote Git I/O; widening it further would have made that worse.
-        self._registry_lock = threading.Lock()   # publishing a new registry
         self._snap_lock = threading.Lock()       # the snapshot dict, never held over I/O
         self._refresh_locks: dict[str, threading.Lock] = {}  # one per project
         # Maps an opaque git-author name (an employee id, where a deployment

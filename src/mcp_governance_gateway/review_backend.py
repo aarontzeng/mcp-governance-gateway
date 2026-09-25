@@ -246,6 +246,14 @@ class GitHubReviewBackend:
 
     def __init__(self, timeout_sec: float = 30.0) -> None:
         self._timeout_sec = timeout_sec
+        self._clients: dict[str, JsonHttpClient] = {}   # per review host
+
+    def _client(self, api: str) -> JsonHttpClient:
+        client = self._clients.get(api)
+        if client is None:
+            client = self._clients[api] = JsonHttpClient(
+                api, error_cls=ReviewBackendError, label="review host", timeout_sec=self._timeout_sec)
+        return client
 
     def _request(
         self,
@@ -256,9 +264,7 @@ class GitHubReviewBackend:
         body: dict[str, Any] | None = None,
     ) -> Any:
         credential = _require_usable_credential(credential)
-        client = JsonHttpClient(spec.api, error_cls=ReviewBackendError, label="review host",
-                                timeout_sec=self._timeout_sec)
-        return client.request(method, path, body=body, headers={
+        return self._client(spec.api).request(method, path, body=body, headers={
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {credential}",
             "X-GitHub-Api-Version": "2022-11-28",

@@ -385,3 +385,50 @@ class TokenIndexTests(unittest.TestCase):
             with self.assertRaises(AuthError):
                 auth.authenticate_header("Bearer revoke-me")
             self.assertEqual(auth.authenticate_header("Bearer keep-me").actor, "k")
+
+
+class EmptyRuntimeStoreTests(unittest.TestCase):
+    """An IdP deployment's runtime store is legitimately empty -- before the
+    first mint, and again after the last revoke -- at boot and on reload."""
+
+    def _files(self, d):
+        base, user = Path(d) / "base.json", Path(d) / "user.json"
+        base.write_text(json.dumps({"tokens": []}), encoding="utf-8")
+        return base, user
+
+    def test_an_empty_store_is_not_a_reload_failure_on_the_first_request(self):
+        with tempfile.TemporaryDirectory() as d:
+            _base, user = self._files(d)
+            user.write_text(json.dumps({"tokens": []}), encoding="utf-8")
+            auth = BearerTokenAuthenticator.from_files([(user, False)], allow_empty=True)
+            with self.assertNoLogs("mcp_governance_gateway", level="WARNING"):
+                with self.assertRaises(AuthError):
+                    auth.authenticate_header("Bearer nobody")
+            self.assertFalse(auth._store.stale)
+
+    def test_revoking_the_last_runtime_token_takes_effect(self):
+        # Without allow_empty on the reload path the empty file was a "failure"
+        # and the last-good map -- the revoked token -- stayed live.
+        with tempfile.TemporaryDirectory() as d:
+            _base, user = self._files(d)
+            user.write_text(json.dumps({"tokens": [{"token": "only", "actor": "a", "project": "p"}]}),
+                            encoding="utf-8")
+            auth = BearerTokenAuthenticator.from_files([(user, False)], allow_empty=True)
+            self.assertEqual(auth.authenticate_header("Bearer only").actor, "a")
+            user.write_text(json.dumps({"tokens": []}), encoding="utf-8")
+            os.utime(user, (time.time() + 5, time.time() + 5))
+            with self.assertRaises(AuthError):
+                auth.authenticate_header("Bearer only")
+
+    def test_without_allow_empty_an_emptied_store_still_keeps_last_good(self):
+        # The default deployment: an empty token file is a misconfiguration and
+        # must not lock everyone out.
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "base.json"
+            base.write_text(json.dumps({"tokens": [{"token": "svc", "actor": "a", "project": "p"}]}),
+                            encoding="utf-8")
+            auth = BearerTokenAuthenticator.from_files([(base, True)])
+            base.write_text(json.dumps({"tokens": []}), encoding="utf-8")
+            os.utime(base, (time.time() + 5, time.time() + 5))
+            with self.assertLogs("mcp_governance_gateway", level="WARNING"):
+                self.assertEqual(auth.authenticate_header("Bearer svc").actor, "a")

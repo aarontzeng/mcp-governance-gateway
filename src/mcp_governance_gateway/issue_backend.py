@@ -142,7 +142,6 @@ class RedmineHttpBackend(IssueBackend):
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key  # shared/service key: non-authorship reads + fallback
-        self._timeout_sec = timeout_sec
         self._http = JsonHttpClient(self._base_url, error_cls=IssueBackendError, label="issue tracker",
                                     timeout_sec=timeout_sec)
         self._project_id_cache: dict[str, int] = {}

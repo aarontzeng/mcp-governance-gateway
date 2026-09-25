@@ -9,6 +9,11 @@ All notable changes to this project are recorded here. The format follows
 ### Fixed
 
 - **One tenant could evict another's pending confirmations.** Preparing a write takes no quota and the confirmation store's only bound was its total of 10,000, so a token with a write role could fill it and push every other tenant's pending confirmations out ("unknown or already-used", start over). Each principal now holds at most 64 and, at that bound, evicts its own oldest; filling the total takes 157 principals at once. ADR-0003 and SECURITY.md record the bound.
+- **An IdP deployment could not revoke its last runtime token.** With `OIDC_ISSUER` set the runtime token store is legitimately empty, but on reload an empty store counted as a failed parse, so the last-good map — the revoked token — stayed live until another token was minted. An empty store now reloads as empty in that mode; the default deployment (no IdP) still keeps last-good, because there an empty token file is a misconfiguration.
+- A `POST /mcp` (or credential enrollment) refused for its `Content-Length` — over 2 MB, or malformed — left that body unread on a keep-alive connection, where it was parsed as the next request. Such a refusal now closes the connection and says so (`Connection: close`).
+- `ci.log` dropped the first line of the window even when the window began exactly at a line start; it is dropped only when the byte before the window was not a newline. The window is also trimmed by whole chunks instead of a memmove per chunk.
+- The container `HEALTHCHECK` built an unparseable URL for an IPv6 bind (`::` or a literal); `::` is probed on `::1` and IPv6 literals are bracketed.
+- A runtime token store that does not exist yet no longer logs "actor labels reload failed" on the first memory or docs read.
 - `serverInfo.version` said 0.2.0 on a 0.3.0 gateway. The version is one literal now (`mcp_governance_gateway.__version__`, read by pyproject), and a test holds the newest CHANGELOG heading to it.
 - `ci.log` returned the last lines of the console's **first** 512 KB, so on a long log the tail was from the middle. The console is now streamed through a 512 KB window and only its end kept; `logBytes` reports the console's full length; `truncated` is true only when the window held fewer lines than were asked for; a console over 64 MiB is refused (413) rather than mis-tailed.
 - SIGTERM (what a container runtime sends on stop) now unwinds `serve_forever` through the same cleanup as Ctrl-C instead of killing the process mid-request.
@@ -39,6 +44,8 @@ All notable changes to this project are recorded here. The format follows
 - `mcp.py` is split: `tools/` holds one `ToolSpec` per tool beside its family's handler, `policy.py` derives its decision from the spec, and `tools/list` filters the same records; a test walks every roles × tenant × features combination and holds discovery to policy.
 - `GatewayApp` takes any `confirm.ConfirmationBackend`; `tests/test_confirm_contract.py` states what a shared implementation must keep. `ConfirmationStore` stays the default.
 - The attribution footer lives in `attribution.py`; a test pins the exact bytes issue notes and review comments carry.
+- `ReloadingFile(load_now=True)` takes the file's signature before the boot-time parse, so an atomic replace landing during the parse is reloaded next time rather than recorded as seen.
+- `GitHubReviewBackend` keeps one HTTP client per review host instead of building one per call; `configure_logging` is idempotent; attributes the shared HTTP client made unused are gone.
 - `server.py` routes from one table, builds each backend in its own factory, and streams artifacts from `artifact_route.py`.
 - `tests/test_phase1_mcp.py` (3100 lines) is seven files named for what they cover; ruff (correctness rules) and mypy over all of `src` run in CI.
 

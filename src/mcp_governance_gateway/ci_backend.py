@@ -21,6 +21,7 @@ import base64
 import http.client
 import json
 import math
+from collections import deque
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -297,14 +298,15 @@ class JenkinsHttpBackend:
             # whether or not it exists on the Jenkins instance.
             raise CiBackendError("unknown job for this project", status=404)
         n = max(1, min(_DEFAULT_LOG_LINES if lines is None else int(lines), _MAX_LOG_LINES))
-        window, total = self._tail_bytes(
+        window, total, mid_line = self._tail_bytes(
             f"/job/{parse.quote(name, safe='')}/lastBuild/consoleText", _LOG_TAIL_WINDOW_BYTES,
         )
         all_lines = window.decode("utf-8", errors="replace").splitlines()
         cut = total > len(window)
-        if cut and all_lines:
+        if mid_line and all_lines:
             # The window starts wherever the byte budget fell, mid-line and
             # possibly mid-character; that fragment is not a line of the log.
+            # (A window that happens to start right after a newline keeps it.)
             all_lines = all_lines[1:]
         meta = self._job_status(name)
         return {
@@ -319,12 +321,17 @@ class JenkinsHttpBackend:
             "truncated": cut and len(all_lines) < n,
         }
 
-    def _tail_bytes(self, path: str, keep: int) -> tuple[bytes, int]:
-        """The last `keep` bytes of a response body, and the body's full length.
+    def _tail_bytes(self, path: str, keep: int) -> tuple[bytes, int, bool]:
+        """The last `keep` bytes of a response body, the body's full length, and
+        whether the window begins inside a line (the byte before it was not a
+        newline).
 
-        Read as a stream so memory stays at `keep` whatever the log's size."""
-        window = bytearray()
-        total = 0
+        Read as a stream so memory stays near `keep` whatever the log's size.
+        Whole chunks are dropped from the front as they fall out of the window
+        -- one slice at the end, not a memmove of the window per chunk."""
+        chunks: deque[bytes] = deque()
+        held = total = 0
+        before: int | None = None   # the last byte dropped, once anything has been
         for chunk in self._stream(path):
             total += len(chunk)
             if total > _MAX_LOG_SCAN_BYTES:
@@ -332,10 +339,17 @@ class JenkinsHttpBackend:
                     f"console log exceeds {_MAX_LOG_SCAN_BYTES} bytes; read it from the CI server directly",
                     status=413,
                 )
-            window += chunk
-            if len(window) > keep:
-                del window[: len(window) - keep]
-        return bytes(window), total
+            chunks.append(chunk)
+            held += len(chunk)
+            while chunks and held - len(chunks[0]) >= keep:
+                dropped = chunks.popleft()
+                held -= len(dropped)
+                before = dropped[-1]
+        window = b"".join(chunks)
+        if len(window) > keep:
+            before = window[-keep - 1]
+            window = window[-keep:]
+        return window, total, before is not None and before != 0x0A
 
     def _stream(self, path: str) -> Iterator[bytes]:
         """A response body in chunks. `_open` maps connection failures; a body

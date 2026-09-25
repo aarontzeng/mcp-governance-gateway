@@ -33,8 +33,9 @@ ENV GATEWAY_PORT=8080
 # Liveness only: /healthz answers without a bearer and calls no backend. The
 # image has no curl, so it is Python's own urllib -- with proxies disabled, since
 # an HTTP(S)_PROXY an operator sets for the backends must not carry a probe of
-# 127.0.0.1. A wildcard bind is probed on loopback; a specific one, on itself.
+# 127.0.0.1. A wildcard bind (v4 or v6) is probed on its loopback; a specific
+# one, on itself, bracketed when it is an IPv6 literal.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD python -c "import os, urllib.request as u; h = os.environ.get('GATEWAY_HOST', '127.0.0.1'); h = '127.0.0.1' if h in ('', '0.0.0.0') else h; u.build_opener(u.ProxyHandler({})).open('http://%s:%s/healthz' % (h, os.environ.get('GATEWAY_PORT', '8080')), timeout=4)"
+  CMD python -c "import os, urllib.request as u; h = os.environ.get('GATEWAY_HOST', '127.0.0.1'); h = '127.0.0.1' if h in ('', '0.0.0.0') else '::1' if h == '::' else h; h = '[%s]' % h if ':' in h else h; u.build_opener(u.ProxyHandler({})).open('http://%s:%s/healthz' % (h, os.environ.get('GATEWAY_PORT', '8080')), timeout=4)"
 
 CMD ["mcp-governance-gateway"]

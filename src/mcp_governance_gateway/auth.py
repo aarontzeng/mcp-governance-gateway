@@ -65,6 +65,7 @@ class BearerTokenAuthenticator:
         self,
         token_claims: dict[str, Principal],
         sources: list[tuple[Path, bool]] | None = None,
+        allow_empty: bool = False,
     ) -> None:
         # sources: (path, required). When set, the token maps are reloaded on file
         # change so tokens minted at runtime (e.g. per-user tokens) take effect
@@ -77,9 +78,13 @@ class BearerTokenAuthenticator:
         # The file is stat'd on every request (about 1.4 us, measured) rather than
         # on a timer: a timer would save that and make every revocation wait for it.
         self._sources = sources or []
+        # allow_empty (an IdP deployment, see from_files) holds on reload too: there
+        # an empty store is what revoking the last minted token looks like, and
+        # keeping the last-good map would keep that token live.
+        self._allow_empty = allow_empty
         self._store: ReloadingFile[_TokenIndex] = ReloadingFile(
             [path for path, _ in self._sources],
-            lambda previous: _TokenIndex.build(self._load_all(self._sources)),
+            lambda previous: _TokenIndex.build(self._reload_claims()),
             what="token file",
             initial=_TokenIndex.build(token_claims),
             failure_message="token file reload failed; keeping the last-good token set",
@@ -110,7 +115,7 @@ class BearerTokenAuthenticator:
         merged = cls._merge_sources(norm)
         if not merged and not allow_empty:
             raise ValueError("no tokens loaded from any source")
-        return cls(merged, sources=norm)
+        return cls(merged, sources=norm, allow_empty=allow_empty)
 
     @staticmethod
     def _merge_sources(sources: list[tuple[Path, bool]]) -> dict[str, Principal]:
@@ -134,6 +139,11 @@ class BearerTokenAuthenticator:
         if not merged:
             raise ValueError("no tokens loaded from any source")
         return merged
+
+    def _reload_claims(self) -> dict[str, Principal]:
+        if self._allow_empty:
+            return self._merge_sources(self._sources)
+        return self._load_all(self._sources)
 
     def _maybe_reload(self) -> None:
         self._store.refresh()

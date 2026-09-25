@@ -65,8 +65,10 @@ class ActorLabelsFileTests(unittest.TestCase):
         p.write_text(json.dumps({"tokens": [{"actor": "10000001", "email": "alice@example.com", "token": "t"}]}))
         al = ActorLabels(str(p))
         self.assertEqual(al.get().get("10000001"), "alice@example.com")
-        # absent file -> empty, no crash
-        self.assertEqual(ActorLabels(str(Path(d) / "nope.json")).get(), {})
+        # absent file -> empty, no crash, and no complaint: it is the state
+        # before the first token is minted
+        with self.assertNoLogs("mcp_governance_gateway", level="WARNING"):
+            self.assertEqual(ActorLabels(str(Path(d) / "nope.json")).get(), {})
         self.assertEqual(ActorLabels(None).get(), {})
 
     def test_a_corrupt_store_keeps_the_last_good_labels_and_is_not_silent(self):

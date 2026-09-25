@@ -101,8 +101,12 @@ class ReloadingFile(Generic[T]):
         self._stale = False
         self._last_complaint = 0.0
         if load_now:
+            # Signature first, as refresh() does under the lock: a write landing
+            # during the parse then differs from it and is reloaded next time,
+            # rather than being recorded as seen.
+            signature = self._signature()
             self._value = self._parse(initial)
-            self._sig = self._signature()
+            self._sig = signature
 
     @property
     def paths(self) -> tuple[Path, ...]:

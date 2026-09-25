@@ -364,6 +364,17 @@ class LogTests(unittest.TestCase):
         self.assertFalse(out["truncated"])
         self.assertEqual(len(out["lines"]), 100)
 
+    def test_a_window_that_starts_on_a_line_boundary_keeps_its_first_line(self):
+        from unittest import mock
+        log = b"".join(b"%04d\n" % i for i in range(1, 11))   # ten 5-byte lines, 50 bytes
+        with mock.patch("mcp_governance_gateway.ci_backend._LOG_TAIL_WINDOW_BYTES", 20):
+            out = FakeJenkins(replies={"/consoleText": log}).log("swarm-build", _ctx(), lines=10)
+            self.assertEqual(out["lines"], ["0007", "0008", "0009", "0010"])   # 20 bytes = 4 whole lines
+            self.assertTrue(out["truncated"])
+        with mock.patch("mcp_governance_gateway.ci_backend._LOG_TAIL_WINDOW_BYTES", 22):
+            out = FakeJenkins(replies={"/consoleText": log}).log("swarm-build", _ctx(), lines=10)
+            self.assertEqual(out["lines"], ["0007", "0008", "0009", "0010"])   # the cut "06" fragment dropped
+
     def test_a_console_beyond_the_scan_cap_is_refused_not_mis_tailed(self):
         from unittest import mock
         log = b"y" * 10_001
