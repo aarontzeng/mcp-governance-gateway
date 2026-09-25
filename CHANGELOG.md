@@ -4,6 +4,12 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- A `release` workflow: once `ci` is green on `main` and the commit's `__version__` has no release yet, it creates the annotated tag, builds the wheel and sdist, and publishes a GitHub release with that version's CHANGELOG section as the notes (see CONTRIBUTING, "Releasing").
+
 ## [0.4.0] — 2026-09-25
 
 ### Fixed

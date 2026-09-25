@@ -62,6 +62,19 @@ Explain *why*, not just *what*. Reference the ADR a change implements or amends.
 Add a line under `[Unreleased]` in `CHANGELOG.md` for anything a deployer would
 notice.
 
+## Releasing
+
+A release is one commit on `main`: set `__version__` in
+`src/mcp_governance_gateway/__init__.py`, rename the CHANGELOG's `[Unreleased]`
+heading to `[<version>] — <date>`, and merge. The `release` workflow runs once
+`ci` is green on that commit, reads the version the commit declares, and — if
+no release with that tag exists — creates the annotated tag `v<version>`,
+builds the wheel and sdist, and publishes a GitHub release whose notes are
+that CHANGELOG section (`scripts/changelog-section.py`). A tag that already
+exists on the same commit is reused; one that points elsewhere fails the run.
+The hygiene test holds the newest CHANGELOG heading to `__version__`, so a
+half-made release commit fails `ci` before the workflow sees it.
+
 ## Conduct
 
 Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).

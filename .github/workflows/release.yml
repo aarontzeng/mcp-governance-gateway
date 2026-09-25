@@ -1,0 +1,86 @@
+name: release
+
+# Tags and publishes a release when a CI-green main carries a version no
+# release has yet. The release commit is the documented one (CONTRIBUTING,
+# "Releasing"): bump __version__, rename the CHANGELOG's Unreleased section
+# to that version and date, merge. Nothing here decides a version; it
+# reads the one the commit declares.
+#
+# Runs after ci, not beside it, so a release is never cut from a red main.
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0   # the tags, to know what is already released
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Read the version the commit declares
+        id: version
+        run: |
+          version=$(python -c "import re, pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/mcp_governance_gateway/__init__.py').read_text()).group(1))")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when this version is already released
+        id: released
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" --json tagName >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.version.outputs.tag }} is already released; nothing to do"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release notes from the CHANGELOG section
+        if: steps.released.outputs.already == 'false'
+        run: |
+          python scripts/changelog-section.py "${{ steps.version.outputs.version }}" > body.md
+          printf '\n**Full changelog:** [CHANGELOG.md](CHANGELOG.md)\n' >> body.md
+
+      - name: Build the wheel and sdist
+        if: steps.released.outputs.already == 'false'
+        run: |
+          pip install build
+          python -m build
+
+      - name: Tag, if the commit is not tagged yet
+        if: steps.released.outputs.already == 'false'
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            [ "$(git rev-list -n1 "$tag")" = "$HEAD_SHA" ] || { echo "::error::$tag exists and points elsewhere"; exit 1; }
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" "$HEAD_SHA" -m "$tag"   # annotated, like every release tag so far
+            git push origin "$tag"
+          fi
+
+      - name: Publish the release
+        if: steps.released.outputs.already == 'false'
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --verify-tag --title "${{ steps.version.outputs.tag }}" --notes-file body.md dist/*

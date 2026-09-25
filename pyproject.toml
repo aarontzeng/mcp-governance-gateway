@@ -61,7 +61,7 @@ ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src"]
+files = ["src", "scripts/changelog-section.py"]
 ignore_missing_imports = true
 # Every module is checked; the bar is "mypy is clean", not "--strict", because
 # the adapters deal in untrusted JSON where `Any` is the honest type.
