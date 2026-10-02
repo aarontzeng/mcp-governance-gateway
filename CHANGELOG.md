@@ -6,6 +6,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The container image runs Python 3.14 (`python:3.14-slim`, pinned by digest; Dependabot's proposal), and CI now tests 3.14 beside 3.11–3.13, so the interpreter the image ships is one the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.
+
 ### Added
 
 - A `release` workflow: once `ci` is green on `main` and the commit's `__version__` has no release yet, it creates the annotated tag, builds the wheel and sdist, and publishes a GitHub release with that version's CHANGELOG section as the notes (see CONTRIBUTING, "Releasing").
