@@ -8,7 +8,7 @@ All notable changes to this project are recorded here. The format follows
 
 ### Changed
 
-- The container image runs Python 3.14 (`python:3.14-slim`, pinned by digest; Dependabot's proposal), and CI now tests 3.14 beside 3.11–3.13, so the interpreter the image ships is one the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.
+- CI tests Python 3.14 beside 3.11–3.13, so that a container image moved to 3.14 runs an interpreter the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.
 
 ### Added
 
