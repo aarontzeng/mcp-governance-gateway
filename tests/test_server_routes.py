@@ -55,6 +55,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         srv = build_server(settings)
         self.srv = srv
         self.audit = ListAuditSink()
+        self._events_seen = 0
         srv.audit_sink = self.audit
 
         listing = json.dumps({"number": 291, "artifacts": [
@@ -122,6 +123,31 @@ class CiArtifactRouteTests(unittest.TestCase):
         time.sleep(0.2)
         return srv.server_address[1]
 
+    def _event(self, timeout: float = 5.0):
+        """The audit event the last request produced, once the server has written it.
+
+        The route records its outcome after the response's last byte is on the
+        wire (only then is "ok" known), so a client can finish reading before the
+        server thread has appended the event. Reading `events[-1]` at once raced
+        that append: it failed on CI (#6, test (3.14)) and fails every time with a
+        50 ms delay before the route's audit call. This waits for a new event.
+        """
+        self._until(lambda: len(self.audit.events) > self._events_seen,
+                    "an audit event", timeout)
+        self._events_seen = len(self.audit.events)
+        return self.audit.events[-1]
+
+    def _until(self, condition, what: str, timeout: float = 5.0) -> None:
+        """Wait for something the server thread does after the response ends:
+        it audits the outcome, then closes the upstream in its `finally`."""
+        import time
+
+        deadline = time.monotonic() + timeout
+        while not condition():
+            if time.monotonic() >= deadline:
+                self.fail(f"{what} did not happen within {timeout}s of the response")
+            time.sleep(0.005)
+
     def _get(self, port, query, token="tok-a"):
         import http.client
 
@@ -144,7 +170,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         # the body really was reassembled from several reads, and upstream was closed
         self.assertGreater(len(self.PAYLOAD), STREAM_CHUNK)
         self.assertGreater(len([n for n in self.reads if n > 0]), 1)
-        self.assertTrue(self.closed)
+        self._until(lambda: bool(self.closed), "the upstream close")
 
 
     def test_the_upstream_content_type_is_never_forwarded(self) -> None:
@@ -208,7 +234,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         port = self._server()
         response, _ = self._get(port, "job=swarm-build&path=out/" + "glpat-" + "x1" * 12)
         self.assertEqual(response.status, 404)
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.outcome, "backend_error")
         self.assertIsNone(event.resource_id)
         self.assertNotIn("glpat-", json.dumps(event.to_json()))
@@ -219,7 +245,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         # metadata lookup.
         port = self._server()
         self._get(port, "job=swarm-build&build=291&path=out/image.bin")
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.tool, "ci.artifact.download")
         self.assertEqual(event.outcome, "ok")
         self.assertEqual(event.resource_id, "swarm-build:out/image.bin")
@@ -232,7 +258,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         port = self._server(max_bytes=1024)
         response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
         self.assertEqual(response.status, 413)
-        self.assertEqual(self.audit.events[-1].outcome, "rejected")
+        self.assertEqual(self._event().outcome, "rejected")
         self.assertNotIn(b"IMAGEBYTES", body)
 
     def test_a_dishonest_upstream_cannot_buy_an_unbounded_transfer(self) -> None:
@@ -252,7 +278,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         with self.assertRaises(http.client.IncompleteRead):
             response.read()
         conn.close()
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.outcome, "truncated")
         # bytes_sent counts what was written, so it can never exceed the cap the
         # stream was stopped at.
@@ -275,7 +301,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         with self.assertRaises(http.client.IncompleteRead):
             response.read()
         conn.close()
-        self.assertEqual(self.audit.events[-1].outcome, "truncated")
+        self.assertEqual(self._event().outcome, "truncated")
 
     def test_an_upstream_transfer_encoding_overrides_its_content_length(self) -> None:
         # Review, 2026-09-03: an upstream sending both Transfer-Encoding: chunked
@@ -295,7 +321,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertEqual(response.getheader("Transfer-Encoding"), "chunked")
         self.assertEqual(response.read(), self.PAYLOAD)
         conn.close()
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.outcome, "ok")
         self.assertEqual(event.bytes_sent, len(self.PAYLOAD))
 
@@ -311,7 +337,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertIn("transfer coding", json.loads(body)["error"])
         self.assertEqual(self.reads, [])          # not one body byte was read
         self.assertEqual(self.closed, [True])
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.outcome, "backend_error")
 
     def test_a_transfer_coding_hidden_behind_a_repeated_field_is_refused(self) -> None:
@@ -326,7 +352,7 @@ class CiArtifactRouteTests(unittest.TestCase):
                 self.assertEqual(response.status, 502)
                 self.assertIn("transfer coding", json.loads(body)["error"])
                 self.assertEqual(self.reads, [])
-                self.assertEqual(self.audit.events[-1].outcome, "backend_error")
+                self.assertEqual(self._event().outcome, "backend_error")
 
     def test_an_empty_transfer_encoding_field_names_no_coding(self) -> None:
         # Round 11: two reviewers read `any(transfer)` as a hole for a field of
@@ -339,7 +365,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
         self.assertEqual(response.status, 200)
         self.assertEqual(body, self.PAYLOAD)
-        self.assertEqual(self.audit.events[-1].outcome, "ok")
+        self.assertEqual(self._event().outcome, "ok")
 
     def test_a_content_coding_http_client_did_not_decode_is_refused(self) -> None:
         # Round 7: `Content-Encoding: gzip` with a plain Content-Length passed
@@ -351,7 +377,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         self.assertIn("content coding", json.loads(body)["error"])
         self.assertEqual(self.reads, [])
         self.assertEqual(self.closed, [True])
-        self.assertEqual(self.audit.events[-1].outcome, "backend_error")
+        self.assertEqual(self._event().outcome, "backend_error")
 
     def test_a_content_coding_hidden_behind_a_repeated_identity_field_is_refused(self) -> None:
         # Round 8: HTTPMessage.get() returns the first of a repeated header, so
@@ -361,7 +387,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         response, body = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
         self.assertEqual(response.status, 502)
         self.assertEqual(self.reads, [])
-        self.assertEqual(self.audit.events[-1].outcome, "backend_error")
+        self.assertEqual(self._event().outcome, "backend_error")
 
     def test_an_identity_content_coding_is_the_artifact_itself(self) -> None:
         port = self._server(content_encoding="identity")
@@ -384,7 +410,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         with self.assertRaises(http.client.IncompleteRead):  # not a timeout: the close is prompt
             response.read()
         conn.close()
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.outcome, "interrupted")
         self.assertGreater(event.bytes_sent, 0)
         self.assertLess(event.bytes_sent, len(self.PAYLOAD))
@@ -405,7 +431,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         with self.assertRaises(http.client.IncompleteRead):
             response.read()
         conn.close()
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.outcome, "interrupted")
         self.assertEqual(event.resource_id, "swarm-build:out/image.bin")
 
@@ -416,7 +442,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         port = self._server(open_error=CiBackendError("CI unavailable"))
         response, _ = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
         self.assertEqual(response.status, 502)
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.outcome, "backend_error")
         self.assertEqual(event.resource_id, "swarm-build:out/image.bin")
 
@@ -438,7 +464,7 @@ class CiArtifactRouteTests(unittest.TestCase):
             self.assertEqual(response.getheader("Transfer-Encoding"), "chunked")
             self.assertNotEqual((response.getheader("Connection") or "").lower(), "close")
             self.assertEqual(body, self.PAYLOAD)
-            self.assertEqual(self.audit.events[-1].outcome, "ok")
+            self.assertEqual(self._event().outcome, "ok")
         conn.close()
 
     def test_an_upstream_that_delivers_less_than_it_declared_is_not_audited_ok(self) -> None:
@@ -455,7 +481,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         with self.assertRaises(http.client.IncompleteRead):
             response.read()
         conn.close()
-        event = self.audit.events[-1]
+        event = self._event()
         self.assertEqual(event.outcome, "interrupted")
         self.assertIn("declared", event.reason)
         self.assertEqual(event.bytes_sent, len(self.PAYLOAD))
@@ -476,7 +502,7 @@ class CiArtifactRouteTests(unittest.TestCase):
         try:
             second, _ = self._get(port, "job=swarm-build&build=291&path=out/image.bin")
             self.assertEqual(second.status, 503)
-            self.assertEqual(self.audit.events[-1].outcome, "rejected")
+            self.assertEqual(self._event().outcome, "rejected")
         finally:
             gate.set()                   # let the first stream finish
             try:
