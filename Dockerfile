@@ -2,7 +2,7 @@
 # stays for the reader. Dependabot (docker ecosystem) proposes the new digest
 # monthly, which is how base-image security fixes arrive -- a pin nobody bumps
 # would freeze them out instead.
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+FROM python:3.14-slim@sha256:0741d101873c12ab927e6f8653feb8862b9bd58771177acb1b885b95141f91b4
 
 WORKDIR /app
 
