@@ -6,6 +6,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `POST /mcp` and credential enrollment refuse a body the same way a staged upload does: exactly one numeric `Content-Length`, no `Transfer-Encoding`, and a short body closes the connection. A second length or a chunked body used to be parsed as the next request on the keep-alive connection.
+
 ### Changed
 
 - CI tests Python 3.14 beside 3.11–3.13, so that a container image moved to 3.14 runs an interpreter the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.
