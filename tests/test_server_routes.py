@@ -4,6 +4,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import socket
 import tempfile
 import threading
 import unittest
@@ -566,29 +567,116 @@ class HttpServerKeepAliveTests(unittest.TestCase):
 
 
 class RefusedBodyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from mcp_governance_gateway.auth import BearerTokenAuthenticator, IdentityVerifier, Principal
+        from mcp_governance_gateway.server import GatewayHTTPServer, make_handler
+
+        self.srv = GatewayHTTPServer(("127.0.0.1", 0), make_handler())
+        self.srv.app = None
+        self.srv.authenticator = BearerTokenAuthenticator(
+            {"t": Principal(actor="a", project="p", roles=(), token_id="i")}
+        )
+        self.srv.identity_verifier = IdentityVerifier(secret="")
+        self.srv.allowed_origins = ()
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def _post(self, *extra: tuple[str, str], body: bytes | None = None, shutdown_write: bool = False):
+        conn = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=5)
+        conn.putrequest("POST", "/mcp")
+        conn.putheader("Authorization", "Bearer t")
+        for name, value in extra:
+            conn.putheader(name, value)
+        conn.endheaders()
+        if body is not None:
+            conn.send(body)
+        if shutdown_write and conn.sock is not None:
+            conn.sock.shutdown(socket.SHUT_WR)
+        response = conn.getresponse()
+        return response.status, response.will_close, response.read()
+
     def test_an_oversize_post_closes_the_connection_instead_of_desynchronising_it(self):
         # The body is refused before it is read; left open, its bytes would be
         # parsed as the next request on this keep-alive connection.
-        from mcp_governance_gateway.auth import BearerTokenAuthenticator, IdentityVerifier, Principal
-        from mcp_governance_gateway.server import GatewayHTTPServer, make_handler
-        srv = GatewayHTTPServer(("127.0.0.1", 0), make_handler())
-        srv.app = None
-        srv.authenticator = BearerTokenAuthenticator({"t": Principal(actor="a", project="p", roles=(), token_id="i")})
-        srv.identity_verifier = IdentityVerifier(secret="")
-        srv.allowed_origins = ()
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        try:
-            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
-            conn.putrequest("POST", "/mcp")
-            conn.putheader("Authorization", "Bearer t")
-            conn.putheader("Content-Length", str(3_000_000))
-            conn.endheaders()
-            response = conn.getresponse()
-            self.assertEqual(response.status, 400)
-            self.assertTrue(response.will_close)
-        finally:
-            srv.shutdown()
-            srv.server_close()
+        status, will_close, _body = self._post(("Content-Length", str(3_000_000)))
+        self.assertEqual(status, 400)
+        self.assertTrue(will_close)
+
+    def test_a_second_content_length_is_refused_and_the_connection_closes(self):
+        # headers.get would have kept the first length and left the second
+        # one's bytes as the next request.
+        status, will_close, body = self._post(("Content-Length", "2"), ("Content-Length", "2"))
+        self.assertEqual(status, 400)
+        self.assertTrue(will_close)
+        self.assertIn(b"one Content-Length", body)
+
+    def test_a_chunked_post_is_refused_and_the_connection_closes(self):
+        status, will_close, body = self._post(("Transfer-Encoding", "chunked"))
+        self.assertEqual(status, 400)
+        self.assertTrue(will_close)
+        self.assertIn(b"one Content-Length", body)
+
+    def test_a_short_body_is_not_accepted_as_json(self):
+        # Content-Length says 100, the peer sends "{}" and closes. Those two
+        # bytes are valid JSON; accepting them would treat a truncated body
+        # as a complete request.
+        status, will_close, body = self._post(
+            ("Content-Length", "100"), body=b"{}", shutdown_write=True,
+        )
+        self.assertEqual(status, 400)
+        self.assertTrue(will_close)
+        self.assertIn(b"incomplete request body", body)
+
+    def _raw(self, request: bytes, follow_up: bytes = b"", timeout: float = 3.0) -> bytes:
+        """Send `request`, then `follow_up` on the same socket, and return everything the server answered before it
+        closed (or until `timeout`). A connection that stays open and parses the follow-up shows two responses."""
+        with socket.create_connection(("127.0.0.1", self.srv.server_address[1]), timeout=timeout) as sock:
+            sock.sendall(request)
+            if follow_up:
+                sock.sendall(follow_up)
+            chunks = []
+            try:
+                while True:
+                    data = sock.recv(65536)
+                    if not data:
+                        break
+                    chunks.append(data)
+            except TimeoutError:
+                chunks.append(b"<<still open>>")
+            return b"".join(chunks)
+
+    def test_a_refused_post_really_closes_the_socket_and_never_parses_the_next_request(self):
+        queued = b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n"
+        for headers in (b"Content-Length: 2\r\nContent-Length: 2\r\n",
+                        b"Transfer-Encoding: chunked\r\n",
+                        b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n"):
+            with self.subTest(headers=headers):
+                answered = self._raw(b"POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\n" + headers
+                                     + b"\r\n", follow_up=queued)
+                self.assertEqual(answered.count(b"HTTP/1.1 "), 1, answered)
+                self.assertIn(b" 400 ", answered.split(b"\r\n", 1)[0] + b" ")
+                self.assertIn(b"one Content-Length is required", answered)   # refused for its framing, not its body
+                self.assertNotIn(b"<<still open>>", answered)
+
+    def test_a_get_that_carries_a_body_closes_instead_of_parsing_it_as_the_next_request(self):
+        smuggled = b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n"
+        request = (b"GET /healthz HTTP/1.1\r\nHost: x\r\nContent-Length: " + str(len(smuggled)).encode()
+                   + b"\r\n\r\n" + smuggled)
+        answered = self._raw(request)
+        self.assertEqual(answered.count(b"HTTP/1.1 "), 1, answered)
+        self.assertNotIn(b"<<still open>>", answered)
+
+    def test_a_peer_that_declares_a_length_and_goes_quiet_gets_a_400_not_a_traceback(self):
+        self.srv.RequestHandlerClass.timeout = 0.4
+        self.addCleanup(setattr, self.srv.RequestHandlerClass, "timeout", 65)
+        answered = self._raw(b"POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\n"
+                             b"Content-Length: 100\r\n\r\n{}", timeout=5.0)
+        self.assertIn(b" 400 ", answered.split(b"\r\n", 1)[0] + b" ")
+        self.assertIn(b"incomplete request body", answered)
 
 
 class LoggingSetupTests(unittest.TestCase):
