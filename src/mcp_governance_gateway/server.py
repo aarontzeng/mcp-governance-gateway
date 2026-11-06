@@ -118,6 +118,22 @@ def is_origin_allowed(origin: str | None, allowed_origins: tuple[str, ...]) -> b
     return origin is None or origin in allowed_origins
 
 
+def single_content_length(headers: Any) -> int:
+    """The one decimal Content-Length, or ValueError.
+
+    A second length, a Transfer-Encoding, or a non-digit value is how a
+    keep-alive connection desynchronises: this process and whatever sits in
+    front of it would disagree about where the next request starts. The asset
+    upload already refused that shape; the JSON routes read `headers.get`,
+    which is the first length only, and then parsed whatever bytes came back.
+    """
+    lengths = headers.get_all("Content-Length", [])
+    transfer = headers.get_all("Transfer-Encoding", [])
+    if transfer or len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+        raise ValueError("one Content-Length is required")
+    return int(lengths[0])
+
+
 def _is_loopback_host(host: str) -> bool:
     import ipaddress
 
@@ -243,12 +259,11 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             if not is_origin_allowed(self.headers.get("Origin"), self.server.allowed_origins):
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "origin denied"})
                 return
-            lengths = self.headers.get_all("Content-Length", [])
-            if (self.headers.get_all("Transfer-Encoding", []) or len(lengths) != 1
-                    or not lengths[0].isascii() or not lengths[0].isdigit()):
-                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "one Content-Length is required"})
+            try:
+                length = single_content_length(self.headers)
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
-            length = int(lengths[0])
             if length > MAX_ASSET_BYTES:
                 self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "upload exceeds size limit"})
                 return
@@ -331,14 +346,16 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
         # ------------------------------------------------------------ helpers
 
         def _read_json(self) -> Any:
-            length_raw = self.headers.get("Content-Length", "0")
-            try:
-                length = int(length_raw)
-            except ValueError as exc:
-                raise ValueError("invalid content length") from exc
+            # Same framing rule as the asset upload. `headers.get` would keep
+            # the first Content-Length and ignore a second one, and a chunked
+            # body has no length to read — either one leaves unread bytes for
+            # the next request on this keep-alive connection.
+            length = single_content_length(self.headers)
             if length <= 0 or length > 2_000_000:
                 raise ValueError("invalid request size")
             raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError("incomplete request body")
             try:
                 return json.loads(raw.decode("utf-8"))
             except json.JSONDecodeError as exc:
