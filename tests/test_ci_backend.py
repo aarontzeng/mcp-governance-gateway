@@ -333,7 +333,11 @@ class StatusTests(unittest.TestCase):
         names = [f"job-{i}" for i in range(4)]
         # All four must be inside _fetch together. A serial walk times this out:
         # the first call is still waiting when the others would have to start.
+        # The bound is only there so a serial regression fails the suite instead
+        # of hanging it. Thread startup is not part of the contract, so the
+        # bound sits far above any scheduling delay that still lets the suite run.
         entered = threading.Barrier(len(names))
+        overlap_timeout = 30
         # Then they finish last-allowlist-name first, so a collector that
         # returns completion order cannot accidentally match the allowlist.
         turn = 0
@@ -345,18 +349,21 @@ class StatusTests(unittest.TestCase):
         class Slow(FakeJenkins):
             def _fetch(self, path: str) -> bytes:
                 nonlocal current, peak, turn
-                idx = next(i for i, name in enumerate(names) if f"/job/{name}/" in path)
+                matches = [i for i, name in enumerate(names) if f"/job/{name}/" in path]
+                if len(matches) != 1:
+                    raise CiBackendError(f"unexpected fetch path {path}", status=500)
+                idx = matches[0]
                 with lock:
                     current += 1
                     peak = max(peak, current)
                 try:
                     try:
-                        entered.wait(2)
+                        entered.wait(overlap_timeout)
                     except threading.BrokenBarrierError:
                         raise CiBackendError("fetches did not overlap", status=500) from None
                     with cond:
                         while turn != len(names) - 1 - idx:
-                            if not cond.wait(2):
+                            if not cond.wait(overlap_timeout):
                                 raise CiBackendError("completion order did not advance", status=500)
                         turn += 1
                         cond.notify_all()
