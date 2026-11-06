@@ -1,6 +1,7 @@
 """The one JSON HTTP path every adapter now shares."""
 from __future__ import annotations
 
+import email.message
 import http.client
 import io
 import unittest
@@ -93,6 +94,22 @@ class JsonHttpClientTests(unittest.TestCase):
             with self.assertRaises(_Err) as caught:
                 _client(max_bytes=10).request("GET", "p")
         self.assertEqual(str(caught.exception), "thing response too large")
+
+    def test_an_http_error_closes_its_body(self):
+        # urlopen raises the response. Left open, the socket waits on cyclic GC.
+        closed: list[bool] = []
+
+        class _Body(io.BytesIO):
+            def close(self) -> None:
+                closed.append(True)
+                super().close()
+
+        err = error.HTTPError("https://backend.example/p", 404, "no", email.message.Message(), _Body(b"{}"))
+        with mock.patch("mcp_governance_gateway.http_client.request.urlopen", side_effect=err):
+            with self.assertRaises(_Err) as caught:
+                _client().request("GET", "p")
+        self.assertEqual(caught.exception.status, 404)
+        self.assertEqual(closed, [True])
 
 
 if __name__ == "__main__":

@@ -570,6 +570,7 @@ class JenkinsHttpBackend:
             with request.urlopen(req, timeout=self._timeout_sec) as response:
                 return response.headers.get("Location")
         except error.HTTPError as exc:
+            exc.close()
             if exc.code == 403:
                 raise CiBackendError(
                     "CI refused the request (403). JENKINS_TOKEN must be an API token, "
@@ -598,6 +599,7 @@ class JenkinsHttpBackend:
         try:
             return request.urlopen(req, timeout=self._timeout_sec)
         except error.HTTPError as exc:
+            exc.close()
             raise CiBackendError(f"CI HTTP {exc.code}", status=exc.code) from exc
         except (OSError, http.client.HTTPException, ValueError) as exc:
             # A garbled status line or an over-long header is an HTTPException, not

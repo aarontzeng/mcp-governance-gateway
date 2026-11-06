@@ -228,6 +228,32 @@ class ArtifactDownloadTests(unittest.TestCase):
         self.assertEqual(str(cm.exception), "CI unavailable")
         self.assertIsNone(cm.exception.status)
 
+    def test_an_http_error_from_a_trigger_or_a_stream_closes_its_body(self):
+        import email.message
+        import io
+        from unittest import mock
+        from urllib import error
+
+        closed: list[bool] = []
+
+        class _Body(io.BytesIO):
+            def close(self) -> None:
+                closed.append(True)
+                super().close()
+
+        def boom(req, timeout):
+            raise error.HTTPError(req.full_url, 500, "no", email.message.Message(), _Body(b"no"))
+
+        backend = JenkinsHttpBackend(
+            "https://jenkins.example", "svc", "TOKEN", {"proj-a": ["swarm-build"]},
+        )
+        with mock.patch("mcp_governance_gateway.ci_backend.request.urlopen", side_effect=boom):
+            with self.assertRaises(CiBackendError):
+                backend._post("/job/swarm-build/build")
+            with self.assertRaises(CiBackendError):
+                backend.open_located("/job/swarm-build/291/artifact/out/image.bin")
+        self.assertEqual(closed, [True, True])
+
     def test_a_garbled_upstream_reply_to_a_status_read_is_ci_unavailable_too(self):
         import http.client
         from unittest import mock

@@ -348,6 +348,25 @@ class GrantTests(_OidcTestCase):
 
 
 class JwksTests(_OidcTestCase):
+    def test_an_http_error_from_the_idp_closes_its_body(self):
+        import email.message
+        import io
+        from unittest import mock
+        from urllib import error
+
+        closed: list[bool] = []
+
+        class _Body(io.BytesIO):
+            def close(self) -> None:
+                closed.append(True)
+                super().close()
+
+        err = error.HTTPError(f"{ISSUER}/jwks", 500, "no", email.message.Message(), _Body(b"no"))
+        with mock.patch("mcp_governance_gateway.oidc.request.urlopen", side_effect=err):
+            with self.assertRaises(error.HTTPError):
+                JwksCache(f"{ISSUER}/jwks")._fetch(f"{ISSUER}/jwks")
+        self.assertEqual(closed, [True])
+
     def test_the_key_set_is_cached_rather_than_fetched_per_request(self):
         self.idp.fetches = 0
         cache = JwksCache(f"{ISSUER}/jwks", opener=self.idp.opener)
