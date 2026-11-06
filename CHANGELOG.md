@@ -6,6 +6,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Audit records are written under a lock. The server handles requests on several threads, and an unlocked write could tear two JSON lines into one.
+
 ### Changed
 
 - CI tests Python 3.14 beside 3.11–3.13, so that a container image moved to 3.14 runs an interpreter the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.
