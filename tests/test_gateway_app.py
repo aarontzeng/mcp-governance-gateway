@@ -1,6 +1,7 @@
 """GatewayApp over the fakes: the JSON-RPC lifecycle, the memory tools, and the confirmation gate and store."""
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 
@@ -583,3 +584,62 @@ class ConfirmationStoreTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("description", reason or "")
         self.assertIn("absent", reason or "")
+
+    def test_argument_hashes_are_not_computed_under_the_store_lock(self) -> None:
+        # The lock is process-wide. Hashing a megabyte-sized proposal while
+        # holding it stalls every other tenant's prepare and commit.
+        import json
+        from unittest import mock
+
+        store = ConfirmationStore()
+        principal = self._principal()
+        real = json.dumps
+
+        def dumps(*args, **kwargs):
+            self.assertFalse(store._lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch("mcp_governance_gateway.confirm.json.dumps", side_effect=dumps):
+            cid = store.issue(principal, "issues.create", {"subject": "x", "n": 1})
+            ok, reason = store.verify(principal, "issues.create", {"subject": "y", "n": 1}, cid)
+        self.assertFalse(ok)
+        self.assertIn("subject", reason or "")
+
+    def test_no_digest_of_any_kind_is_computed_under_the_store_lock(self) -> None:
+        # json.dumps is only one of the hashing paths: the identity key and the raw string fields hash without it.
+        from unittest import mock
+
+        store = ConfirmationStore()
+        principal = self._principal()
+        real = hashlib.sha256
+        calls = []
+
+        def sha256(*args, **kwargs):
+            calls.append(1)
+            self.assertFalse(store._lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch("mcp_governance_gateway.confirm.hashlib.sha256", side_effect=sha256):
+            cid = store.issue(principal, "issues.create", {"subject": "x", "n": 1})
+            self.assertEqual(store.verify(principal, "issues.create", {"subject": "x", "n": 1}, cid), (True, None))
+            cid = store.issue(principal, "issues.create", {"subject": "x", "n": 1})
+            ok, _reason = store.verify(principal, "issues.create", {"subject": "y", "n": 1}, cid)
+        self.assertFalse(ok)
+        self.assertGreaterEqual(len(calls), 8)    # the guard saw every hash of both flows, not none
+
+    def test_the_expiry_is_stamped_after_the_hashing_not_before_it(self) -> None:
+        # A slow hash must not leave a confirmation that was already expired when it was issued.
+        from unittest import mock
+
+        now = [0.0]
+        store = ConfirmationStore(clock=lambda: now[0])
+        principal = self._principal()
+        real = hashlib.sha256
+
+        def slow(*args, **kwargs):
+            now[0] += 1000.0                       # far beyond the 300 s TTL, spent while hashing
+            return real(*args, **kwargs)
+
+        with mock.patch("mcp_governance_gateway.confirm.hashlib.sha256", side_effect=slow):
+            cid = store.issue(principal, "issues.create", {"subject": "x"})
+        self.assertEqual(store.verify(principal, "issues.create", {"subject": "x"}, cid), (True, None))
