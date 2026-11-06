@@ -6,6 +6,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A backend HTTP error now closes its response immediately. `urlopen` raises that response instead of returning it, so the socket was held until cyclic GC — a burst of 404s could exhaust file descriptors before the collector ran. The OIDC discovery fetch also closed its success response only at GC.
+
 ### Changed
 
 - CI tests Python 3.14 beside 3.11–3.13, so that a container image moved to 3.14 runs an interpreter the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.

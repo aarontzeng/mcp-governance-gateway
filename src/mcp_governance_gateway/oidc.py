@@ -147,6 +147,24 @@ def _public_key_from_jwk(jwk: dict[str, Any]):
     return None
 
 
+def _read_http(url: str) -> bytes:
+    """The body, bounded, closed on success and on an HTTP error.
+
+    `urlopen` raises `HTTPError` instead of returning it, so a `with` around
+    the call never runs. The error response (and its socket) then lives in a
+    traceback cycle until GC. The discovery path used to `.read()` and drop
+    the response on the success path too.
+    """
+    req = request.Request(url, headers={"Accept": "application/json"}, method="GET")
+    try:
+        response = request.urlopen(req, timeout=_JWKS_TIMEOUT_SEC)
+    except error.HTTPError as exc:
+        exc.close()
+        raise
+    with response:
+        return response.read(_MAX_JWKS_BYTES)
+
+
 class JwksCache:
     """The issuer's public keys, cached, with last-good kept on a fetch failure.
 
@@ -168,9 +186,7 @@ class JwksCache:
         self._last_attempt = 0.0
 
     def _fetch(self, url: str) -> bytes:
-        req = request.Request(url, headers={"Accept": "application/json"}, method="GET")
-        with request.urlopen(req, timeout=_JWKS_TIMEOUT_SEC) as response:
-            return response.read(_MAX_JWKS_BYTES)
+        return _read_http(url)
 
     def _fetch_keys(self) -> dict[str, Any]:
         raw = self._open(self._url)
@@ -512,9 +528,7 @@ def discover_jwks_url(issuer: str, opener: Callable[[str], bytes] | None = None)
     be induced to point elsewhere would move the whole trust root.
     """
     url = issuer.rstrip("/") + "/.well-known/openid-configuration"
-    fetch = opener or (lambda u: request.urlopen(
-        request.Request(u, headers={"Accept": "application/json"}, method="GET"),
-        timeout=_JWKS_TIMEOUT_SEC).read(_MAX_JWKS_BYTES))
+    fetch = opener or _read_http
     try:
         document = _json_object(fetch(url), "discovery document")
     except (OSError, error.URLError, AuthError, ValueError) as exc:
