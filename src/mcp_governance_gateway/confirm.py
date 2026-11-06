@@ -151,6 +151,12 @@ class ConfirmationStore:
     def issue(self, principal: Principal, tool: str, args: dict[str, Any]) -> str:
         now = self._clock()
         owner = self._owner_key(principal)
+        # Hashes before the lock. A docs proposal can be megabytes, and this lock
+        # is process-wide: hashing under it made one large prepare stall every
+        # other tenant's confirm. The digests are pure functions of the arguments.
+        identity = self._identity_key(principal, tool)
+        action = self._action_key(principal, tool, args)
+        fields = self._field_digests(args)
         with self._lock:
             self._prune(now)
             owned = self._owned.get(owner)
@@ -159,13 +165,7 @@ class ConfirmationStore:
             if len(self._pending) >= self._max_entries:
                 self._drop(min(self._pending, key=lambda n: self._pending[n][3]))
             nonce = secrets.token_urlsafe(18)
-            self._pending[nonce] = (
-                self._identity_key(principal, tool),
-                self._action_key(principal, tool, args),
-                self._field_digests(args),
-                now + self._ttl,
-                owner,
-            )
+            self._pending[nonce] = (identity, action, fields, now + self._ttl, owner)
             self._owned.setdefault(owner, OrderedDict())[nonce] = None
             return nonce
 
@@ -190,29 +190,36 @@ class ConfirmationStore:
                 "confirm was supplied but is empty or not a string — it must be the exact "
                 "confirmationId string returned by the previous call"
             )
+        # Same as issue(): the argument hash is the expensive part and does not
+        # touch the store, so it stays outside the process-wide lock. The field
+        # digests are only needed when the action key mismatches, and they hash
+        # the body a second time, so they wait until that is known.
+        identity = self._identity_key(principal, tool)
+        action = self._action_key(principal, tool, args)
         with self._lock:
             entry = self._pending.get(provided)
             if entry is None:
                 return False, "unknown or already-used confirmationId"
             identity_key, action_key, confirmed_fields, expiry, _owner = entry
-            if not hmac.compare_digest(identity_key, self._identity_key(principal, tool)):
+            if not hmac.compare_digest(identity_key, identity):
                 return False, "unknown or already-used confirmationId"
             if expiry <= self._clock():
                 self._drop(provided)
                 return False, f"confirmationId expired ({self._ttl}s TTL) — start over with a fresh call"
-            if not hmac.compare_digest(action_key, self._action_key(principal, tool, args)):
-                now_fields = self._field_digests(args)
-                changed = ", ".join(
-                    f"{k} (confirmed {confirmed_fields.get(k, 'absent')}, got {now_fields.get(k, 'absent')})"
-                    for k in sorted(set(confirmed_fields) | set(now_fields))
-                    if confirmed_fields.get(k) != now_fields.get(k)
-                )
-                return False, (
-                    f"confirmationId is valid but these arguments changed since it was issued: {changed}. "
-                    "Resend the ORIGINAL values byte-for-byte — not a regenerated or reformatted copy, and "
-                    "not the truncated echo. Equal length with a different digest means the text was altered "
-                    "character-for-character (typographic quotes, dashes, non-breaking spaces): diff your two "
-                    "payloads rather than retrying the same way."
-                )
-            self._drop(provided)  # single-use: consume so the token cannot be replayed
-            return True, None
+            if hmac.compare_digest(action_key, action):
+                self._drop(provided)  # single-use: consume so the token cannot be replayed
+                return True, None
+            confirmed_snapshot = dict(confirmed_fields)
+        now_fields = self._field_digests(args)
+        changed = ", ".join(
+            f"{k} (confirmed {confirmed_snapshot.get(k, 'absent')}, got {now_fields.get(k, 'absent')})"
+            for k in sorted(set(confirmed_snapshot) | set(now_fields))
+            if confirmed_snapshot.get(k) != now_fields.get(k)
+        )
+        return False, (
+            f"confirmationId is valid but these arguments changed since it was issued: {changed}. "
+            "Resend the ORIGINAL values byte-for-byte — not a regenerated or reformatted copy, and "
+            "not the truncated echo. Equal length with a different digest means the text was altered "
+            "character-for-character (typographic quotes, dashes, non-breaking spaces): diff your two "
+            "payloads rather than retrying the same way."
+        )

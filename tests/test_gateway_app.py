@@ -583,3 +583,23 @@ class ConfirmationStoreTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("description", reason or "")
         self.assertIn("absent", reason or "")
+
+    def test_argument_hashes_are_not_computed_under_the_store_lock(self) -> None:
+        # The lock is process-wide. Hashing a megabyte-sized proposal while
+        # holding it stalls every other tenant's prepare and commit.
+        import json
+        from unittest import mock
+
+        store = ConfirmationStore()
+        principal = self._principal()
+        real = json.dumps
+
+        def dumps(*args, **kwargs):
+            self.assertFalse(store._lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch("mcp_governance_gateway.confirm.json.dumps", side_effect=dumps):
+            cid = store.issue(principal, "issues.create", {"subject": "x", "n": 1})
+            ok, reason = store.verify(principal, "issues.create", {"subject": "y", "n": 1}, cid)
+        self.assertFalse(ok)
+        self.assertIn("subject", reason or "")
