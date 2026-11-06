@@ -14,6 +14,7 @@ All notable changes to this project are recorded here. The format follows
 ### Fixed
 
 - **A process started soon after a boot lost its first event to a throttle clock.** `time.monotonic()` counts from boot, and two throttles started their clock at 0.0: the hot-reload store's warning (one per 30 s) swallowed the first "keeping the last-good copy" message, and the OIDC key-set cache held its first fetch back for the 30 s cooldown, so the first token was refused as an unknown key. Within 30 s of a boot (a fresh CI runner, a restarted VM) that showed up as `test_auth` logging assertions failing on a single CI leg. Both clocks now start at minus infinity.
+- **Audit records are written under a lock.** The server handles requests on several threads, and an unlocked write and flush could tear two JSON lines into one. The line is built before the lock; the write and the flush share it.
 
 ### Added
 

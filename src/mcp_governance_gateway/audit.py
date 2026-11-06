@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, TextIO
@@ -48,12 +49,25 @@ class AuditSink:
 
 
 class JsonLinesAuditSink(AuditSink):
+    """One JSON object per line on a stream shared by every request thread.
+
+    `ThreadingHTTPServer` handles requests concurrently, and a `TextIO` write
+    is not atomic: two `write` calls can interleave inside the buffer and two
+    flushes can split a line across the underlying file. The line is built
+    before the lock so the JSON work does not stall the other writers; the
+    lock covers the write and the flush together, which is what keeps one
+    record one line.
+    """
+
     def __init__(self, stream: TextIO | None = None) -> None:
         self._stream = stream if stream is not None else sys.stdout
+        self._lock = threading.Lock()
 
     def write(self, event: AuditEvent) -> None:
-        self._stream.write(json.dumps(event.to_json(), ensure_ascii=False) + "\n")
-        self._stream.flush()
+        line = json.dumps(event.to_json(), ensure_ascii=False) + "\n"
+        with self._lock:
+            self._stream.write(line)
+            self._stream.flush()
 
 
 class ListAuditSink(AuditSink):
