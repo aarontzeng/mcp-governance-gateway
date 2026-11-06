@@ -1,6 +1,7 @@
 """The one JSON HTTP path every adapter now shares."""
 from __future__ import annotations
 
+import email.message
 import http.client
 import io
 import unittest
@@ -94,6 +95,35 @@ class JsonHttpClientTests(unittest.TestCase):
                 _client(max_bytes=10).request("GET", "p")
         self.assertEqual(str(caught.exception), "thing response too large")
 
+    def test_an_http_error_closes_its_body(self):
+        # urlopen raises the response. Left open, the socket waits on cyclic GC.
+        class _Body(io.BytesIO):
+            closed_by_us = False
 
-if __name__ == "__main__":
-    unittest.main()
+            def close(self) -> None:
+                self.closed_by_us = True
+                super().close()
+
+        body = _Body(b"{}")
+        err = error.HTTPError("https://backend.example/p", 404, "no", email.message.Message(), body)
+        with mock.patch("mcp_governance_gateway.http_client.request.urlopen", side_effect=err):
+            with self.assertRaises(_Err) as caught:
+                _client().request("GET", "p")
+        self.assertEqual(caught.exception.status, 404)
+        self.assertTrue(body.closed_by_us)
+
+    def test_a_close_that_raises_does_not_replace_the_normalised_error(self):
+        class _Body(io.BytesIO):
+            failed_once = False
+
+            def close(self) -> None:
+                if not self.failed_once:
+                    self.failed_once = True
+                    raise OSError("close failed")       # only the first close; the finaliser's second one must not warn
+                super().close()
+
+        err = error.HTTPError("https://backend.example/p", 503, "no", email.message.Message(), _Body(b"{}"))
+        with mock.patch("mcp_governance_gateway.http_client.request.urlopen", side_effect=err):
+            with self.assertRaises(_Err) as caught:
+                _client().request("GET", "p")
+        self.assertEqual(caught.exception.status, 503)

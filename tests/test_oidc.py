@@ -349,6 +349,53 @@ class GrantTests(_OidcTestCase):
 
 
 class JwksTests(_OidcTestCase):
+    def test_an_http_error_from_the_idp_closes_its_body(self):
+        import email.message
+        import io
+        from unittest import mock
+        from urllib import error
+
+        class _Body(io.BytesIO):
+            closed_by_us = False
+
+            def close(self) -> None:
+                self.closed_by_us = True
+                super().close()
+
+        body = _Body(b"no")
+        err = error.HTTPError(f"{ISSUER}/jwks", 500, "no", email.message.Message(), body)
+        with mock.patch("mcp_governance_gateway.oidc.request.urlopen", side_effect=err):
+            with self.assertRaises(error.HTTPError):
+                JwksCache(f"{ISSUER}/jwks")._fetch(f"{ISSUER}/jwks")
+        self.assertTrue(body.closed_by_us)
+
+    def test_the_default_discovery_fetch_closes_its_response_on_success_and_on_error(self):
+        import email.message
+        import io
+        from unittest import mock
+        from urllib import error
+
+        from mcp_governance_gateway.oidc import discover_jwks_url
+
+        class _Response(io.BytesIO):
+            closed_by_us = False
+
+            def close(self) -> None:
+                self.closed_by_us = True
+                super().close()
+
+        ok = _Response(json.dumps({"jwks_uri": f"{ISSUER}/keys"}).encode())
+        with mock.patch("mcp_governance_gateway.oidc.request.urlopen", return_value=ok):
+            self.assertEqual(discover_jwks_url(ISSUER), f"{ISSUER}/keys")
+        self.assertTrue(ok.closed_by_us)
+
+        body = _Response(b"no")
+        err = error.HTTPError(f"{ISSUER}/x", 500, "no", email.message.Message(), body)
+        with mock.patch("mcp_governance_gateway.oidc.request.urlopen", side_effect=err):
+            with self.assertRaises(ValueError):
+                discover_jwks_url(ISSUER)
+        self.assertTrue(body.closed_by_us)
+
     def test_the_key_set_is_cached_rather_than_fetched_per_request(self):
         self.idp.fetches = 0
         cache = JwksCache(f"{ISSUER}/jwks", opener=self.idp.opener)

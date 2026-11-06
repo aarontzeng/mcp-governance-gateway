@@ -24,6 +24,15 @@ from .errors import BackendError
 MAX_RESPONSE_BYTES = 2_000_000
 
 
+def close_error_response(exc: error.HTTPError) -> None:
+    """Close the body an `HTTPError` still owns, and never let that cleanup replace the error being handled: a close that
+    raises must leave the caller's normalised error (and its audit event) intact."""
+    try:
+        exc.close()
+    except Exception:  # noqa: BLE001 - cleanup only
+        pass
+
+
 class JsonHttpClient:
     """`request()` returns the decoded JSON body (an empty body is `{}`) or
     raises `error_cls` with a message that starts with `label`:
@@ -100,6 +109,10 @@ class JsonHttpClient:
             with request.urlopen(req, timeout=self._timeout_sec) as response:
                 raw = response.read(self._max_bytes + 1)
         except error.HTTPError as exc:
+            # urlopen raises instead of returning, so the `with` never closes
+            # the body. The exception (and its socket) then sits in a traceback
+            # cycle until GC. Close it before wrapping.
+            close_error_response(exc)
             raise self._error_cls(f"{self._label} HTTP {exc.code}", status=exc.code) from exc
         except (OSError, http.client.HTTPException, ValueError) as exc:
             raise self._error_cls(f"{self._label} unavailable") from exc
