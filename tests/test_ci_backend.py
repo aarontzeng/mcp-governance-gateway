@@ -329,36 +329,45 @@ class StatusTests(unittest.TestCase):
 
     def test_many_jobs_are_fetched_together_and_returned_in_allowlist_order(self):
         import threading
-        import time
 
+        names = [f"job-{i}" for i in range(4)]
+        # All four must be inside _fetch together. A serial walk times this out:
+        # the first call is still waiting when the others would have to start.
+        entered = threading.Barrier(len(names))
+        # Then they finish last-allowlist-name first, so a collector that
+        # returns completion order cannot accidentally match the allowlist.
+        turn = 0
+        cond = threading.Condition()
+        lock = threading.Lock()
         current = 0
         peak = 0
-        lock = threading.Lock()
 
         class Slow(FakeJenkins):
             def _fetch(self, path: str) -> bytes:
-                nonlocal current, peak
+                nonlocal current, peak, turn
+                idx = next(i for i, name in enumerate(names) if f"/job/{name}/" in path)
                 with lock:
                     current += 1
                     peak = max(peak, current)
                 try:
-                    # The first job is the slowest, so a completion-order collector
-                    # would report it last. Allowlist order must still win.
-                    time.sleep(0.25 if "/job/job-0/" in path else 0.05)
+                    try:
+                        entered.wait(2)
+                    except threading.BrokenBarrierError:
+                        raise CiBackendError("fetches did not overlap", status=500) from None
+                    with cond:
+                        while turn != len(names) - 1 - idx:
+                            if not cond.wait(2):
+                                raise CiBackendError("completion order did not advance", status=500)
+                        turn += 1
+                        cond.notify_all()
                     return super()._fetch(path)
                 finally:
                     with lock:
                         current -= 1
 
-        names = [f"job-{i}" for i in range(4)]
-        started = time.monotonic()
         out = Slow(jobs={"proj-a": names}).status(_ctx())
-        elapsed = time.monotonic() - started
         self.assertEqual([job["job"] for job in out["jobs"]], names)
-        self.assertGreaterEqual(peak, 2)
-        # Four in series would be 0.25 + 3 * 0.05 = 0.40s before any overhead.
-        # Overlapped, the wait is the slow job.
-        self.assertLess(elapsed, 0.40)
+        self.assertGreaterEqual(peak, 4)
 
     def test_an_overlapping_failure_is_still_the_earliest_jobs(self):
         class Split(FakeJenkins):
