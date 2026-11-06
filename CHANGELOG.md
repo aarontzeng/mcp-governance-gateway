@@ -8,6 +8,7 @@ All notable changes to this project are recorded here. The format follows
 
 ### Changed
 
+- `ci.status` and a project-wide `ci.builds` fetch their jobs concurrently, four at a time. One tool call waits on the slowest in-flight job rather than the sum of every job. Results stay in allowlist order, and a hard failure is still the earliest job's.
 - CI tests Python 3.14 beside 3.11–3.13, so that a container image moved to 3.14 runs an interpreter the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.
 - The container image runs Python 3.14 (`python:3.14-slim`, pinned by index digest; when pinned, seven of its eight platforms were 3.14.8-slim-trixie and one was still 3.14.7).
 

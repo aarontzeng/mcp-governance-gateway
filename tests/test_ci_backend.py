@@ -327,6 +327,52 @@ class StatusTests(unittest.TestCase):
         with self.assertRaises(CiBackendError):
             FakeJenkins().status(_ctx(project="proj-b"))
 
+    def test_many_jobs_are_fetched_together_and_returned_in_allowlist_order(self):
+        import threading
+        import time
+
+        current = 0
+        peak = 0
+        lock = threading.Lock()
+
+        class Slow(FakeJenkins):
+            def _fetch(self, path: str) -> bytes:
+                nonlocal current, peak
+                with lock:
+                    current += 1
+                    peak = max(peak, current)
+                try:
+                    # The first job is the slowest, so a completion-order collector
+                    # would report it last. Allowlist order must still win.
+                    time.sleep(0.25 if "/job/job-0/" in path else 0.05)
+                    return super()._fetch(path)
+                finally:
+                    with lock:
+                        current -= 1
+
+        names = [f"job-{i}" for i in range(4)]
+        started = time.monotonic()
+        out = Slow(jobs={"proj-a": names}).status(_ctx())
+        elapsed = time.monotonic() - started
+        self.assertEqual([job["job"] for job in out["jobs"]], names)
+        self.assertGreaterEqual(peak, 2)
+        # Four in series would be 0.25 + 3 * 0.05 = 0.40s before any overhead.
+        # Overlapped, the wait is the slow job.
+        self.assertLess(elapsed, 0.40)
+
+    def test_an_overlapping_failure_is_still_the_earliest_jobs(self):
+        class Split(FakeJenkins):
+            def _fetch(self, path: str) -> bytes:
+                if "/job/swarm-build/" in path:
+                    raise CiBackendError("CI HTTP 500", status=500)
+                if "/job/swarm-lint/" in path:
+                    raise CiBackendError("CI HTTP 502", status=502)
+                return super()._fetch(path)
+
+        with self.assertRaises(CiBackendError) as cm:
+            Split().status(_ctx())
+        self.assertEqual(cm.exception.status, 500)
+
 
 class EmptyBodyTests(unittest.TestCase):
     def test_an_empty_json_body_reads_as_nothing_rather_than_invalid_json(self):
