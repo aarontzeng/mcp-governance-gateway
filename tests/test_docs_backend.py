@@ -340,6 +340,61 @@ class SpecKeyedSnapshotTests(unittest.TestCase):
                      "q": {"url": self.other, "branch": "master"}})
         self.assertEqual(self.corpus.get("wiki/x.md", _ctx("p"))["text"], "# Second")
 
+    def test_removing_a_project_drops_its_snapshot(self):
+        # The snapshot is the corpus, up to the 64 MiB cap. Removing the project
+        # from the repos file used to leave it in memory until restart.
+        self.corpus.get("wiki/x.md", _ctx("p"))
+        self.corpus.get("wiki/y.md", _ctx("q"))
+        self.assertIn("p", self.corpus._snapshots)
+        self._write({"q": {"url": self.other, "branch": "master"}})
+        self.corpus.get("wiki/y.md", _ctx("q"))
+        self.assertNotIn("p", self.corpus._snapshots)
+        self.assertIn("q", self.corpus._snapshots)
+
+    def test_a_removal_landing_between_the_refresh_and_the_publication_leaves_no_snapshot(self):
+        # The membership check and the insert used to straddle the lock: a reload that removed the project in between
+        # left its snapshot in memory, and the sweep had already run for that generation.
+        corpus = self.corpus
+        real_lock = corpus._snap_lock
+        armed = {"on": False}
+
+        class TripLock:
+            def __enter__(inner):
+                if armed["on"]:
+                    armed["on"] = False
+                    self._write({"q": {"url": self.other, "branch": "master"}})
+                    corpus.has_project("q")            # reloads the file and runs the sweep for the new generation
+                return real_lock.__enter__()
+
+            def __exit__(inner, *exc):
+                return real_lock.__exit__(*exc)
+
+        real_refresh = corpus._refresh
+
+        def refresh(spec):
+            snap = real_refresh(spec)
+            armed["on"] = True                         # the next lock entry is the publication's
+            return snap
+
+        corpus._snap_lock = TripLock()
+        corpus._refresh = refresh
+        corpus.get("wiki/x.md", _ctx("p"))
+        self.assertNotIn("p", corpus._snapshots)
+
+    def test_a_reader_holding_an_older_registry_cannot_sweep_a_newer_projects_snapshot(self):
+        from mcp_governance_gateway.docs_backend import _Registry
+
+        self.corpus.get("wiki/y.md", _ctx("q"))
+        self.assertIn("q", self.corpus._snapshots)
+        self._write({"p": {"url": self.first, "branch": "master"},
+                     "q": {"url": self.other, "branch": "master"}, "r": {"url": self.second, "branch": "master"}})
+        self.corpus.has_project("q")                   # generation 1 is current and swept
+        retired = self.corpus._retired_through
+        older = _Registry(generation=retired - 1, repos={"p": {"url": self.first, "branch": "master"}})
+        self.corpus._drop_removed(older)               # a reader that captured generation 0 and was delayed
+        self.assertIn("q", self.corpus._snapshots)
+        self.assertEqual(self.corpus._retired_through, retired)
+
     def test_another_projects_edit_does_not_invalidate_this_ones_snapshot(self):
         # The snapshot key is (url, branch), NOT the registry generation -- otherwise
         # every unrelated edit would force every project to refetch.

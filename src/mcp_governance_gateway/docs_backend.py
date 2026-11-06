@@ -207,6 +207,9 @@ class DocsCorpus:
         self._pull_interval = pull_interval_sec
         self._git_timeout = git_timeout_sec
         self._snapshots: dict[str, _Snapshot] = {}
+        # Generation of the registry we last dropped removed projects from.
+        # -1 so the first lookup runs the drop even when the generation is 0.
+        self._retired_through = -1
         # Three narrow locks rather than one wide one. The old single lock was held
         # across clone/fetch/reset, so every project's docs calls queued behind one
         # project's remote Git I/O; widening it further would have made that worse.
@@ -243,7 +246,30 @@ class DocsCorpus:
         Publication is one assignment of one immutable object, so a reader either
         sees the whole old registry or the whole new one -- generation included.
         No lock is held over any Git work."""
-        return self._registry_store.current
+        registry = self._registry_store.current
+        if registry.generation > self._retired_through:
+            self._drop_removed(registry)
+        return registry
+
+    def _drop_removed(self, registry: _Registry) -> None:
+        """Forget snapshots for projects that left the repos file.
+
+        A snapshot is the corpus, up to the 64 MiB cap. Leaving it until
+        restart meant removing a project from the file did not release that
+        memory. The refresh lock stays: an in-flight refresh of a project
+        being removed still holds the old one, and a lock is a few words.
+        The on-disk clone is a different leftover and stays the operator's
+        to delete.
+        """
+        with self._snap_lock:
+            # Only forwards. A reader that captured an older registry and paused must not sweep against it after a
+            # newer one has added a project back: that would delete the new project's snapshot and move the counter
+            # backwards.
+            if registry.generation <= self._retired_through:
+                return
+            for project in [name for name in self._snapshots if name not in registry.repos]:
+                del self._snapshots[project]
+            self._retired_through = registry.generation
 
     def _resolve_spec(self, project: str | None) -> _Spec:
         """Capture this project's specification once, from one registry publication."""
@@ -423,13 +449,15 @@ class DocsCorpus:
                           "git timed out" if timed_out else stderr.decode(errors="replace").strip()[:500])
                 detail = "git timed out" if timed_out else "git clone/fetch failed"
                 raise DocsBackendError(f"docs corpus unavailable: {detail}", status=503) from exc
-            # Resolved before taking the snapshot lock, so no lock is ever held while
-            # another is acquired.
-            still_current = self._resolve_spec_quietly(spec.project) == spec.fingerprint
             with self._snap_lock:
                 # Only publish if the specification is still the one we fetched. If it
-                # changed underneath us, this snapshot is already history.
-                if still_current:
+                # changed underneath us, this snapshot is already history. The check is made HERE, under the same
+                # lock the removal sweep takes: made before it, a reload that removed the project could land between
+                # the check and the insert, and the snapshot would outlive its project until the next generation.
+                # The registry store has its own lock and nothing takes it while holding this one's twin, so reading
+                # it here cannot invert an order; `_current_registry` is not used because it sweeps under this lock.
+                entry = self._registry_store.current.repos.get(spec.project)
+                if entry and (str(entry["url"]), str(entry.get("branch", "master"))) == spec.fingerprint:
                     self._snapshots[spec.project] = snap
             return snap
 
