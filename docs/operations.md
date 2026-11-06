@@ -340,7 +340,8 @@ volume alone.
 | OIDC signing keys (`oidc.py`) | the IdP's key set | `OIDC_JWKS_TTL_SEC` (600 s default) |
 | Memory and enrollment rate-limit windows (`limits.py`, `internal_api.py`) | one entry per actor (and project) ever seen; each window prunes itself | **restart** — the keys stay, their contents do not |
 | Tracker project ids — Redmine and GitLab (`issue_backend.py`, `gitlab_backend.py`) | one entry per `issue_project` ever resolved | **restart** |
-| Docs snapshots and their refresh locks (`docs_backend.py`) | one per project ever served, each up to the corpus caps (64 MiB) | **restart**; a project removed from `DOCS_REPOS_FILE` keeps its snapshot in memory until then |
+| Docs snapshots (`docs_backend.py`) | one per project in the current repos file, each up to the corpus caps (64 MiB) | the next reload of `DOCS_REPOS_FILE` drops a project that left it |
+| Docs refresh locks (`docs_backend.py`) | one per project ever refreshed | **restart** |
 | Docs clones on disk (`DOCS_CLONE_DIR`) | one directory per project **and url** | **nothing** — delete them yourself |
 
 Two of these are worth an operator's attention beyond their size:

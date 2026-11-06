@@ -340,6 +340,17 @@ class SpecKeyedSnapshotTests(unittest.TestCase):
                      "q": {"url": self.other, "branch": "master"}})
         self.assertEqual(self.corpus.get("wiki/x.md", _ctx("p"))["text"], "# Second")
 
+    def test_removing_a_project_drops_its_snapshot(self):
+        # The snapshot is the corpus, up to the 64 MiB cap. Removing the project
+        # from the repos file used to leave it in memory until restart.
+        self.corpus.get("wiki/x.md", _ctx("p"))
+        self.corpus.get("wiki/y.md", _ctx("q"))
+        self.assertIn("p", self.corpus._snapshots)
+        self._write({"q": {"url": self.other, "branch": "master"}})
+        self.corpus.get("wiki/y.md", _ctx("q"))
+        self.assertNotIn("p", self.corpus._snapshots)
+        self.assertIn("q", self.corpus._snapshots)
+
     def test_another_projects_edit_does_not_invalidate_this_ones_snapshot(self):
         # The snapshot key is (url, branch), NOT the registry generation -- otherwise
         # every unrelated edit would force every project to refetch.
