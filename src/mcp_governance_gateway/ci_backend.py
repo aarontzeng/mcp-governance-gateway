@@ -22,9 +22,10 @@ import http.client
 import json
 import math
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 from urllib import error, parse, request
 
 from .errors import BackendError
@@ -51,6 +52,40 @@ _MAX_LOG_LINES = 1000
 _DEFAULT_LOG_LINES = 200
 _MAX_BUILD_COUNT = 50
 _DEFAULT_BUILD_COUNT = 10
+# One tool call may ask about every allowlisted job. Fetching them in series
+# makes the call wait on the sum of the round trips; this many run at once.
+# The artifact stream's own cap is the same idea: one request must not open
+# an unbounded number of upstream connections.
+_STATUS_FANOUT = 4
+
+_T = TypeVar("_T")
+
+
+def _in_allowlist_order(names: list[str], call: Callable[[str], _T]) -> list[_T]:
+    """`call` per name, at most `_STATUS_FANOUT` at once, results in `names` order.
+
+    The failure that surfaces is the earliest name's, which is what a sequential
+    walk would have raised even when a later job fails first. Later calls may
+    already be in flight; the fan-out is what bounds that.
+    """
+    if len(names) <= 1:
+        return [call(name) for name in names]
+    workers = min(_STATUS_FANOUT, len(names))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(call, name) for name in names]
+        results: list[_T] = []
+        first_error: Exception | None = None
+        for future in futures:
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                # Retrieve every failure. A future whose exception nobody reads
+                # is logged at GC, and the one we raise is the earliest name's.
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+        return results
 # One shared budget for the project-wide fan-out: 30 jobs x 50 builds is not an
 # answer, it is a denial of the agent's own context window.
 _MAX_TOTAL_BUILD_ROWS = 200
@@ -284,9 +319,7 @@ class JenkinsHttpBackend:
     def status(self, context: RequestContext) -> dict[str, Any]:
         """Last-build status for every allowlisted job of the caller's project."""
         jobs = self._project_jobs(context)
-        out = []
-        for name in jobs:
-            out.append(self._job_status(name))
+        out = _in_allowlist_order(jobs, self._job_status)
         return {"jobs": out, "count": len(out)}
 
     def log(self, job: str, context: RequestContext, lines: int | None = None) -> dict[str, Any]:
@@ -386,7 +419,8 @@ class JenkinsHttpBackend:
             per_job = max(1, min(per_job, _MAX_TOTAL_BUILD_ROWS // len(names)))
         else:
             names = [self._require_allowlisted(job, context)]
-        return {"jobs": [self._job_builds(name, per_job) for name in names], "count": len(names)}
+        rows = _in_allowlist_order(names, lambda name: self._job_builds(name, per_job))
+        return {"jobs": rows, "count": len(names)}
 
     def _job_builds(self, name: str, limit: int) -> dict[str, Any]:
         try:
