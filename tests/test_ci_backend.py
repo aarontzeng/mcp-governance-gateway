@@ -387,6 +387,154 @@ class StatusTests(unittest.TestCase):
         with self.assertRaises(CiBackendError):
             FakeJenkins().status(_ctx(project="proj-b"))
 
+    def test_many_jobs_are_fetched_together_and_returned_in_allowlist_order(self):
+        import threading
+
+        names = [f"job-{i}" for i in range(4)]
+        # All four must be inside _fetch together. A serial walk times this out:
+        # the first call is still waiting when the others would have to start.
+        # The bound is only there so a serial regression fails the suite instead
+        # of hanging it. Thread startup is not part of the contract, so the
+        # bound sits far above any scheduling delay that still lets the suite run.
+        entered = threading.Barrier(len(names))
+        overlap_timeout = 30
+        # Then they finish last-allowlist-name first, so a collector that
+        # returns completion order cannot accidentally match the allowlist.
+        turn = 0
+        cond = threading.Condition()
+        lock = threading.Lock()
+        current = 0
+        peak = 0
+
+        class Slow(FakeJenkins):
+            def _fetch(self, path: str) -> bytes:
+                nonlocal current, peak, turn
+                matches = [i for i, name in enumerate(names) if f"/job/{name}/" in path]
+                if len(matches) != 1:
+                    raise CiBackendError(f"unexpected fetch path {path}", status=500)
+                idx = matches[0]
+                with lock:
+                    current += 1
+                    peak = max(peak, current)
+                try:
+                    try:
+                        entered.wait(overlap_timeout)
+                    except threading.BrokenBarrierError:
+                        raise CiBackendError("fetches did not overlap", status=500) from None
+                    with cond:
+                        while turn != len(names) - 1 - idx:
+                            if not cond.wait(overlap_timeout):
+                                raise CiBackendError("completion order did not advance", status=500)
+                        turn += 1
+                        cond.notify_all()
+                    return super()._fetch(path)
+                finally:
+                    with lock:
+                        current -= 1
+
+        out = Slow(jobs={"proj-a": names}).status(_ctx())
+        self.assertEqual([job["job"] for job in out["jobs"]], names)
+        self.assertGreaterEqual(peak, 4)
+
+    def test_an_overlapping_failure_is_still_the_earliest_jobs(self):
+        import threading
+
+        later_failed = threading.Event()
+
+        class Split(FakeJenkins):
+            def _fetch(self, path: str) -> bytes:
+                if "/job/swarm-build/" in path:
+                    # the earliest job fails only AFTER the later one has: completion order is the reverse
+                    if not later_failed.wait(30):
+                        raise CiBackendError("later job never failed", status=500)
+                    raise CiBackendError("CI HTTP 500", status=500)
+                if "/job/swarm-lint/" in path:
+                    later_failed.set()
+                    raise CiBackendError("CI HTTP 502", status=502)
+                return super()._fetch(path)
+
+        with self.assertRaises(CiBackendError) as cm:
+            Split().status(_ctx())
+        self.assertEqual(cm.exception.status, 500)
+
+    def test_a_failure_stops_the_calls_that_have_not_started_yet(self):
+        import threading
+        import time
+
+        names = [f"job-{i}" for i in range(20)]
+        lock = threading.Lock()
+        started: list[str] = []
+
+        class Failing(FakeJenkins):
+            def _fetch(self, path: str) -> bytes:
+                name = next(n for n in names if f"/job/{n}/" in path)
+                with lock:
+                    started.append(name)
+                if name == "job-0":
+                    raise CiBackendError("CI HTTP 500", status=500)
+                time.sleep(1.0)       # keeps every other worker busy while the caller sees the failure and cancels
+                return super()._fetch(path)
+
+        with self.assertRaises(CiBackendError) as cm:
+            Failing(jobs={"proj-a": names}).status(_ctx())
+        self.assertEqual(cm.exception.status, 500)
+        # job-0 failed at once; the worker it freed may take one more, the other three are busy: nothing beyond the
+        # first four-plus-one was ever started, where an uncancelled queue would have run all twenty
+        self.assertEqual(sorted(started, key=names.index), names[:5], started)
+
+    def test_no_more_than_the_fan_out_run_at_once_for_a_long_allowlist(self):
+        import threading
+        import time
+
+        names = [f"job-{i}" for i in range(12)]
+        lock = threading.Lock()
+        current = 0
+        peak = 0
+
+        class Counting(FakeJenkins):
+            def _fetch(self, path: str) -> bytes:
+                nonlocal current, peak
+                with lock:
+                    current += 1
+                    peak = max(peak, current)
+                try:
+                    time.sleep(0.02)
+                    return super()._fetch(path)
+                finally:
+                    with lock:
+                        current -= 1
+
+        out = Counting(jobs={"proj-a": names}).status(_ctx())
+        self.assertEqual([job["job"] for job in out["jobs"]], names)
+        self.assertLessEqual(peak, 4)
+
+    def test_a_project_wide_builds_call_fetches_its_jobs_together_too(self):
+        import threading
+
+        names = [f"job-{i}" for i in range(4)]
+        entered = threading.Barrier(len(names))
+
+        class Together(FakeJenkins):
+            def _fetch(self, path: str) -> bytes:
+                try:
+                    entered.wait(30)
+                except threading.BrokenBarrierError:
+                    raise CiBackendError("fetches did not overlap", status=500) from None
+                return super()._fetch(path)
+
+        out = Together(jobs={"proj-a": names}).builds(None, _ctx())
+        self.assertTrue(out)
+
+    def test_a_worker_thread_that_cannot_start_is_a_503_not_an_unhandled_error(self):
+        from unittest import mock
+
+        names = [f"job-{i}" for i in range(4)]
+        with mock.patch("mcp_governance_gateway.ci_backend.ThreadPoolExecutor.submit",
+                        side_effect=RuntimeError("can't start new thread")):
+            with self.assertRaises(CiBackendError) as cm:
+                FakeJenkins(jobs={"proj-a": names}).status(_ctx())
+        self.assertEqual(cm.exception.status, 503)
+
 
 class EmptyBodyTests(unittest.TestCase):
     def test_an_empty_json_body_reads_as_nothing_rather_than_invalid_json(self):

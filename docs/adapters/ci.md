@@ -54,9 +54,11 @@ as wide as `ci.status` already is: the budget bounds the *depth* of the history,
 the allowlist bounds the *width*, and neither bounds the other.
 
 Like `ci.status`, a project-wide call makes one Jenkins request per allowlisted
-job, sequentially, so its worst case is the job count times `JENKINS_TIMEOUT_SEC`.
-Both tools share that shape; keep the allowlist to the jobs a project actually
-watches.
+job, up to four at a time, so its worst case is about `ceil(jobs / 4)` times
+`JENKINS_TIMEOUT_SEC`. Results stay in allowlist order, and the error that is
+reported is the earliest job's; once it is known, calls that have not started are
+cancelled (those in flight finish). Both tools share that shape; keep the
+allowlist to the jobs a project actually watches.
 
 `startedAt` is the ISO-8601 field to reason with; the raw Jenkins `timestamp`
 (epoch ms) is kept beside it because `ci.status` has emitted it since 0.1.0.
