@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
@@ -355,6 +356,17 @@ class JwksTests(_OidcTestCase):
         for _ in range(5):
             auth.authenticate(self.idp.token())
         self.assertEqual(self.idp.fetches, 1)
+
+    def test_the_first_fetch_is_not_held_back_on_a_host_that_has_just_booted(self):
+        # time.monotonic() counts from boot: a gateway started within the cooldown of a boot must still fetch its
+        # keys for the first token instead of refusing it as an unknown key
+        for uptime in (0.0, 5.0, 29.9):
+            with self.subTest(uptime=uptime), mock.patch("mcp_governance_gateway.oidc.time.monotonic",
+                                                         return_value=uptime):
+                self.idp.fetches = 0
+                cache = JwksCache(f"{ISSUER}/jwks", opener=self.idp.opener)
+                self.assertIsNotNone(cache.get("r1"))
+                self.assertEqual(self.idp.fetches, 1)
 
     def test_an_unknown_kid_is_refused_and_does_not_stampede_the_idp(self):
         cache = JwksCache(f"{ISSUER}/jwks", opener=self.idp.opener)

@@ -99,7 +99,9 @@ class ReloadingFile(Generic[T]):
         # nothing ever differs from it.
         self._sig: object = () if not self._paths else _UNSET
         self._stale = False
-        self._last_complaint = 0.0
+        # -inf, not 0.0: monotonic() counts from boot, so 0.0 would swallow the first complaint of a process
+        # started within the throttle window of a boot.
+        self._last_complaint = float("-inf")
         if load_now:
             # Signature first, as refresh() does under the lock: a write landing
             # during the parse then differs from it and is reloaded next time,

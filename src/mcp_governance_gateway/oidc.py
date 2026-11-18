@@ -165,7 +165,9 @@ class JwksCache:
         self._lock = threading.Lock()
         self._keys: dict[str, Any] = {}
         self._fetched_at = 0.0
-        self._last_attempt = 0.0
+        # -inf, not 0.0: monotonic() counts from boot, so 0.0 would hold the first fetch back for the cooldown on a
+        # gateway started soon after a boot, and the first token would be refused as an unknown key.
+        self._last_attempt = float("-inf")
 
     def _fetch(self, url: str) -> bytes:
         req = request.Request(url, headers={"Accept": "application/json"}, method="GET")
