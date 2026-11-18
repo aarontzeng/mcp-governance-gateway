@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from mcp_governance_gateway.hotfile import (
     ReloadingFile,
@@ -72,6 +73,18 @@ class ReloadingFileTests(unittest.TestCase):
         _bump(self.path)
         self.assertEqual(store.current, {"v": 3})
         self.assertFalse(store.stale)
+
+    def test_the_first_failure_is_reported_on_a_host_that_has_just_booted(self):
+        # time.monotonic() counts from boot on Linux, so a process started within the throttle window of a boot (a fresh
+        # CI runner, a restarted VM) saw `now - 0.0 <= 30` and swallowed its very first complaint.
+        self.path.write_text("{ nope", encoding="utf-8")
+        for uptime in (0.0, 5.0, 29.9):
+            with self.subTest(uptime=uptime), mock.patch("mcp_governance_gateway.hotfile.time.monotonic",
+                                                         return_value=uptime):
+                fresh = self._store()
+                with self.assertLogs("mcp_governance_gateway.hotfile", level="WARNING") as logs:
+                    self.assertEqual(fresh.current, {"v": 0})      # the corrupt file leaves `initial` in place
+                self.assertIn("keeping the last-good copy", logs.output[0])
 
     def test_retry_failed_re_reads_a_corrupt_file_on_every_access(self):
         # For an allow-list, last-good is fail-open, so a repair that lands with

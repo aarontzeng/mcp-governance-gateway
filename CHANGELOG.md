@@ -11,6 +11,10 @@ All notable changes to this project are recorded here. The format follows
 - CI tests Python 3.14 beside 3.11–3.13, so that a container image moved to 3.14 runs an interpreter the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.
 - The container image runs Python 3.14 (`python:3.14-slim`, pinned by index digest; when pinned, seven of its eight platforms were 3.14.8-slim-trixie and one was still 3.14.7).
 
+### Fixed
+
+- **A process started soon after a boot lost its first event to a throttle clock.** `time.monotonic()` counts from boot, and two throttles started their clock at 0.0: the hot-reload store's warning (one per 30 s) swallowed the first "keeping the last-good copy" message, and the OIDC key-set cache held its first fetch back for the 30 s cooldown, so the first token was refused as an unknown key. Within 30 s of a boot (a fresh CI runner, a restarted VM) that showed up as `test_auth` logging assertions failing on a single CI leg. Both clocks now start at minus infinity.
+
 ### Added
 
 - A `release` workflow: once `ci` is green on `main` and the commit's `__version__` has no release yet, it creates the annotated tag, builds the wheel and sdist, and publishes a GitHub release with that version's CHANGELOG section as the notes (see CONTRIBUTING, "Releasing").
@@ -18,6 +22,7 @@ All notable changes to this project are recorded here. The format follows
 ## [0.4.0] — 2026-09-25
 
 ### Fixed
+
 
 - **One tenant could evict another's pending confirmations.** Preparing a write takes no quota and the confirmation store's only bound was its total of 10,000, so a token with a write role could fill it and push every other tenant's pending confirmations out ("unknown or already-used", start over). Each principal now holds at most 64 and, at that bound, evicts its own oldest; filling the total takes 157 principals at once. ADR-0003 and SECURITY.md record the bound.
 - **An IdP deployment could not revoke its last runtime token.** With `OIDC_ISSUER` set the runtime token store is legitimately empty, but on reload an empty store counted as a failed parse, so the last-good map — the revoked token — stayed live until another token was minted. An empty store now reloads as empty in that mode; the default deployment (no IdP) still keeps last-good, because there an empty token file is a misconfiguration.
