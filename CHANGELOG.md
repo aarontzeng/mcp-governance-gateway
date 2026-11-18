@@ -10,6 +10,7 @@ All notable changes to this project are recorded here. The format follows
 
 - CI tests Python 3.14 beside 3.11–3.13, so that a container image moved to 3.14 runs an interpreter the suite has run on. The suite passed unchanged on 3.14 locally, with deprecation warnings as errors.
 - The container image runs Python 3.14 (`python:3.14-slim`, pinned by index digest; when pinned, seven of its eight platforms were 3.14.8-slim-trixie and one was still 3.14.7).
+- **`ci.status` and a project-wide `ci.builds` fetch up to four jobs at a time.** They used to walk every allowlisted job in series, so one call waited on the sum of the round trips; now it waits about `ceil(jobs / 4)` rounds. Results stay in allowlist order and the error reported is still the earliest job's; once that is known, calls that have not started are cancelled. A worker thread that cannot be started is a 503.
 
 ### Fixed
 
